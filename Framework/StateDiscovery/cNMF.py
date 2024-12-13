@@ -19,9 +19,9 @@
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
-import lib.pymf
-from lib.pymf import cnmf
-from lib.cnmf_helpers import *
+import StateDiscovery.lib.pymf
+from StateDiscovery.lib.pymf import cnmf
+from StateDiscovery.lib.cnmf_helpers import *
 import numpy as np
 import pandas as pd
 import random
@@ -36,7 +36,7 @@ from joblib import Parallel, delayed
 #-------------------------------------------------------------------------------
 # 3.1 Run cNMF analysis
 #------------------------------------------------------------------------------- 
-def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,K=None,n_iter=10,n_final_iter=100,min_cophentic,max_clusters,Ncores):
+def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,K=None,n_iter=10,n_final_iter=100,min_cophentic=0.9,max_clusters=10,Ncores=10):
     data_scaled = Create_Cluster_Matrix(GEX,Omega,Fractions,weighing)
     # Run Initial cNMF runs
     data_dict = dict()

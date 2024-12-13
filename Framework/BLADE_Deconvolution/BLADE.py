@@ -1846,7 +1846,7 @@ class BLADE_numba:
 
 
 
-def Parallel_Purification(obj,weight = 100, iter=1000, minDiff=10e-4, Update_SigmaY=False):
+def Parallel_Purification(obj,weight, iter=1000, minDiff=10e-4, Update_SigmaY=False):
     obj.Check_health()
     obj_func = [float('nan')] * iter
     obj_func[0] = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
@@ -1861,11 +1861,11 @@ def Parallel_Purification(obj,weight = 100, iter=1000, minDiff=10e-4, Update_Sig
             break
     return obj, obj_func
 
-def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores,weight=100):
+def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores,Weight=100,sY = 1,Alpha0 = 1000,Kappa0 = 1):
     Mu = ensure_numpy(Mu)
     Omega = ensure_numpy(Omega)
     Y = ensure_numpy(Y)
-    obj = BLADE_object['final_obj']
+    obj = BLADE_object
     obj.Alpha = convert_to_numpy(obj.Alpha)
     obj.SigmaY = convert_to_numpy(obj.SigmaY)
     obj.Mu0 = convert_to_numpy(obj.Mu0)
@@ -1876,8 +1876,8 @@ def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores,weight=100):
     Ngene, Nsample = Y.shape
     Ncell = Mu.shape[1]
     logY = np.log(Y+1)
-    SigmaY = np.tile(np.std(logY,1)[:,np.newaxis], [1,Nsample]) * BLADE_object['outs']['sY'] + 0.1
-    Beta0 = BLADE_object['outs']['Alpha0'] * np.square(Omega)
+    SigmaY = np.tile(np.std(logY,1)[:,np.newaxis], [1,Nsample]) * sY + 0.1
+    Beta0 = Alpha0 * np.square(Omega)
     Nu_Init = np.zeros((Nsample, Ngene, Ncell))
     for i in range(Nsample):
         Nu_Init[i,:,:] = Mu
@@ -1891,9 +1891,9 @@ def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores,weight=100):
             SigmaY = np.atleast_2d(SigmaY[ix,:]),
             Mu0 = np.atleast_2d(Mu[ix,:]),
             Alpha = obj.Alpha,
-            Alpha0 = BLADE_object['outs']['Alpha0'],
+            Alpha0 = Alpha0,
             Beta0 = np.atleast_2d(Beta0[ix,:]),
-            Kappa0 = BLADE_object['outs']['Kappa0'],
+            Kappa0 =Kappa0,
             Nu_Init = np.reshape(np.atleast_3d(Nu_Init[:,ix,:]), (Nsample,1,Ncell)), 
             Omega_Init = np.atleast_2d(Omega[ix,:]),
             Beta_Init = obj.Beta,
@@ -1936,7 +1936,7 @@ def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores,weight=100):
     obj = BLADE_numba(Y, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0, Nu_Init, Omega_Init, Beta_Init, fix_Beta =True)
     obj.log = logs
     
-    return obj, obj_func
+    return obj
 
 
 
