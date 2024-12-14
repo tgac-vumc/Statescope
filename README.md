@@ -1,12 +1,12 @@
 <p align="center">
-  <img width="424" height="200" src="https://github.com/tgac-vumc/Statescope/blob/main/img/Logo_Statescope.png">
+  <img width="424" height="200" src="https://github.com/tgac-vumc/Statescope/blob/master/img/Logo_Statescope.png">
 </p>
 
 # OncoBLADE: Malignant cell fraction-informed deconvolution
 OncoBLADE is a Bayesian deconvolution method designed to estimate cell type-specific gene expression profiles and fractions from bulk RNA profiles of tumor specimens by integrating prior knowledge on cell fractions. You can find the [preprint of OncoBLADE at Research Square](https://www.researchsquare.com/article/rs-4252952/v1).
 
 <p align="center">
-  <img width="75%" height="75%" src="https://github.com/tgac-vumc/Statescope/blob/main/img/Statescope_Overview.png">
+  <img width="75%" height="75%" src="https://github.com/tgac-vumc/Statescope/blob/master/img/Statescope_Overview.png">
 </p>
 
 
