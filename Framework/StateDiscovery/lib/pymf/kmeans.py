@@ -77,7 +77,7 @@ class Kmeans(PyMFBase):
     def _update_w(self):            
         for i in range(self._num_bases):
             # cast to bool to use H as an index for data
-            idx = np.array(self.H[i,:], dtype=np.bool)
+            idx = np.array(self.H[i,:], dtype=bool)
             n = np.sum(idx)
             if n > 0:
                 self.W[:,i] = np.sum(self.data[:, idx], axis=1)/n

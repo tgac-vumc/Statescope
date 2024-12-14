@@ -7,11 +7,13 @@
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
+from StateDiscovery.lib.pymf import cnmf
 import numpy as np
 from scipy.spatial.distance import  pdist
 from scipy.cluster.hierarchy import average, cophenet
 from joblib import Parallel, delayed
 import random
+import pandas as pd
 
 
 #-------------------------------------------------------------------------------
@@ -74,15 +76,14 @@ def biggest_drop(cophcors):
 
 
 def Create_Cluster_Matrix(GEX,Omega,Fractions,celltype,weighing = 'Omega'):
-    if args.weighing == 'Omega':
-        data_scaled = ((GEX - np.mean(GEX,axis=0))*Omega.loc[GEX.columns][celltype]).to_numpy()
-    elif args.weighing == 'OmegaFractions':
-        data_scaled = ((GEX - np.mean(GEX,axis=0))*Omega.loc[GEX.columns][celltype])
-        data_scaled = data_scaled.mul(Fractions[celltype], axis = 0).to_numpy()
-    elif args.weighing == 'centering':
-        data_scaled = GEX - np.mean(GEX,axis=0).to_numpy()
-    elif args.weighing == 'no_weighing':
-        data_scaled = GEX.to_numpy()
-    Cluster_matrix = pd.DataFrame(data_scaled, index = GEX.index, columns = GEX.columns)
+    if weighing == 'Omega':
+        Cluster_matrix = ((GEX - np.mean(GEX,axis=0))*Omega.loc[:,celltype].transpose()).to_numpy()
+    elif weighing == 'OmegaFractions':
+        Cluster_matrix = ((GEX - np.mean(GEX,axis=0))*Omega.loc[:,celltype].transpose())
+        Cluster_matrix = Cluster_matrix.mul(Fractions[celltype], axis = 0).to_numpy()
+    elif weighing == 'centering':
+        Cluster_matrix = GEX - np.mean(GEX,axis=0).to_numpy()
+    elif weighing == 'no_weighing':
+        Cluster_matrix = GEX.to_numpy()
     return Cluster_matrix
 

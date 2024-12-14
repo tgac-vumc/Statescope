@@ -3,7 +3,7 @@
 # Statescope.py
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #
-# Statescope framework code
+# Statescope framework
 # Author: Jurriaan Janssen (j.janssen4@amsterdamumc.nl)
 #
 # Usage:
@@ -20,22 +20,24 @@ Statescope_model.StateDiscovery()
 # 1) 
 #
 # History:
-#  13-12-2024: File creation, write code
+#  13-12-2024: File creation, write code, test Deconvolution and Refinement
+#  14-12-2024: Finish StateDiscovery testing
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
 from BLADE_Deconvolution.BLADE import Framework_Iterative,Purify_AllGenes
-from StateDiscovery.cNMF import cNMF
+from StateDiscovery.cNMF import StateDiscovery_FrameWork
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
+from collections.abc import Iterable
 from glob import glob
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
 #-------------------------------------------------------------------------------
 class Statescope_Object:
-    def __init__(self, Bulk, scExp,scVar,Samples,Celltypes,Genes,Markers):
+    def __init__(self, Bulk, scExp,scVar,Samples,Celltypes,Genes,Markers,Ncores):
         self.Bulk = Bulk
         self.scExp = scExp
         self.scVar = scVar
@@ -43,6 +45,7 @@ class Statescope_Object:
         self.Celltypes = Celltypes
         self.Genes = Genes
         self.Markers = Markers
+        self.Ncores = Ncores
 
 
     def Deconvolution(self, Ind_Marker=None,
@@ -77,7 +80,7 @@ class Statescope_Object:
         # Excecute BLADE Deconvolution: FrameWork iterative
         final_obj, best_obj, best_set, outs = Framework_Iterative(scExp_marker, scVar_marker, Y, Ind_Marker,
                         Alpha, Alpha0, Kappa0, sY,
-                        Nrep, Njob, fsel, Update_SigmaY, Init_Trust,
+                        Nrep, self.Ncores, fsel, Update_SigmaY, Init_Trust,
                         Expectation, Temperature, IterMax)
         # Save BLADE result in Statescope object
         self.BLADE = final_obj
@@ -86,7 +89,7 @@ class Statescope_Object:
 
         
     # Do Gene Expression Refinement
-    def Refinement(self, Ncores=10,weight=100):
+    def Refinement(self,weight=100):
         """ 
         Perform Gene expression refinement with all genes
         :param Statescope_Object self: Statescope_Object
@@ -102,16 +105,18 @@ class Statescope_Object:
         # Prepare Bulk (select/match genes
         Y = self.Bulk.loc[self.Genes,self.Samples].to_numpy()
         # Perform gene expression revinement with all genes in signature
-        obj = Purify_AllGenes(self.BLADE, scExp_All, scVar_All,Y,Ncores, weight)
+        obj = Purify_AllGenes(self.BLADE, scExp_All, scVar_All,Y,self.Ncores, weight)
         # create output GEX dictionary
         GEX = {ct:pd.DataFrame(obj.Nu[:,:,i],index=self.Samples,columns=self.Genes) for i,ct in enumerate(self.Celltypes)}
+        Omega = {ct:pd.DataFrame(obj.Omega[:,i],index=self.Genes,columns=[ct]) for i,ct in enumerate(self.Celltypes)}
         # Store in Statescope object
         self.BLADE_final = obj
         self.GEX = GEX
+        self.Omega = Omega
 
     # Perform State Discovery
     def StateDiscovery(self, celltype = '',
-                       K = [None],weighing = 'Omega',n_iter = 10,n_final_iter = 100,min_cophenetic = 0.9,max_clusters=10,Ncores = 10):
+                       K = [None],weighing = 'Omega',n_iter = 10,n_final_iter = 100,min_cophenetic = 0.9,max_clusters=10):
         """ 
         Perform StateDiscovery from ctSpecificGEX using cNMF
         by default all cell types are used and the optimal K is determined
@@ -133,24 +138,28 @@ class Statescope_Object:
         """
         if celltype == '':
             celltype = self.Celltypes
-            K = K * self.Ncell
+            K = K * len(celltype)
         # by default, perform State Discovery for all celltypes
         if isinstance(celltype, Iterable):
             State_dict = dict()
-            # Iterate over celltypes
+            # Iterate over celltypes (can be done in parallel)
             for ct,k in zip(celltype,K):
                 # save cNMF models in State dict
-                State_dict[ct] = StateDiscovery_FrameWork(self.GEX,self.Omega,self.Fractions,ct,k,n_iter,n_final_iter,min_cophentic,max_clusters,Ncores)
+                State_dict[ct] = StateDiscovery_FrameWork(self.GEX[ct],self.Omega[ct],self.Fractions,ct,weighing,k,n_iter,n_final_iter,min_cophenetic,max_clusters,self.Ncores)
             # save cNMF models as dict
             self.cNMF = State_dict
-            # Save State scores as compile pandas.DataFrame
-            self.StateScores = pd.concat([pd.DataFrame(cNMF.H,index = self.Samples).add_prefix(ct+'_') for ct,cNMF in State_dict.items()], axis = 1)
-            # Save State loadings as compile pandas.DataFrame
-            self.StateLoadings =  pd.concat([pd.DataFrame(cNMF.W,index = self.Genes).add_prefix(ct+'_') for ct,cNMF in State_dict.items()], axis = 1)
+            # Save State scores and loadings as compile pandas.DataFrame
+            StateScores = pd.DataFrame()
+            StateLoadings = pd.DataFrame()
+            for ct,cNMF in State_dict.items():
+                StateScores = pd.concat([StateScores,pd.DataFrame(cNMF.H.transpose(),index = self.Samples).add_prefix(ct+'_')], axis = 1)
+                StateLoadings = pd.concat([StateLoadings,pd.DataFrame(cNMF.W,index = self.Genes).add_prefix(ct+'_')], axis = 1)
+            self.StateLoadings =  StateLoadings
+            self.StateScores = StateScores
         # alternatively, perform State discovery for one cell type
         else:
             # save cNMF models as single cNMF instance
-            self.cNMF = StateDiscovery_FrameWork(self.GEX,self.Omega,self.Fractions,celltype,K,n_iter,n_final_iter,min_cophentic,max_clusters,Ncores)
+            self.cNMF = StateDiscovery_FrameWork(self.GEX[ct],self.Omega[ct],self.Fractions,celltype,weighing,K,n_iter,n_final_iter,min_cophentic,max_clusters,self.Ncores)
             # save State scores and loadings
             self.StateScores = pd.DataFrame(cNMF.H, index = self.Samples).add_prefix(celltype)
             self.StateLoadings =pd.DataFrame(cNMF.W, index = self.Genes).add_prefix(celltype)
@@ -163,10 +172,11 @@ class Statescope_Object:
 #-------------------------------------------------------------------------------
 
 
-def Check_Bulk_Format(Bulk)
+def Check_Bulk_Format(Bulk):
+    pass
 
 
-def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes=''):
+def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores = 10):
     TumorTypes = ['NSCLC', 'PBMC', 'PDAC']
     if not TumorType  and Signature == None:
         raise AssertionError("Signature is not specified")
@@ -186,7 +196,7 @@ def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes=''):
     Markers = Signature[Signature.IsMarker].index.tolist()
     Omega_columns = ['scVar_'+ct for ct in Celltypes]
     Mu_columns = ['scExp_'+ct for ct in Celltypes]
-    Statescope_object = Statescope_Object(Bulk,Signature[Mu_columns],Signature[Omega_columns],Samples,Celltypes,Genes,Markers)
+    Statescope_object = Statescope_Object(Bulk,Signature[Mu_columns],Signature[Omega_columns],Samples,Celltypes,Genes,Markers,Ncores)
     return Statescope_object
 
     

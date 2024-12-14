@@ -36,8 +36,8 @@ from joblib import Parallel, delayed
 #-------------------------------------------------------------------------------
 # 3.1 Run cNMF analysis
 #------------------------------------------------------------------------------- 
-def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,K=None,n_iter=10,n_final_iter=100,min_cophentic=0.9,max_clusters=10,Ncores=10):
-    data_scaled = Create_Cluster_Matrix(GEX,Omega,Fractions,weighing)
+def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=None,n_iter=10,n_final_iter=100,min_cophenetic=0.9,max_clusters=10,Ncores=10):
+    data_scaled = Create_Cluster_Matrix(GEX,Omega,Fractions,celltype,weighing)
     # Run Initial cNMF runs
     data_dict = dict()
     if K == None:
@@ -53,14 +53,15 @@ def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,K=None,n_iter=10,n_fin
             cophcors = [d['cophcor'] for d in data_dict.values()]
             ks = [k for k in data_dict.keys()]
 
-            nclust = find_threshold(cophcors,ks,min_cophenetic=min_coph)
+            nclust = find_threshold(cophcors,ks,min_cophenetic)
             drop = biggest_drop(cophcors)
             if not nclust:
                 nclust = drop
     else:
         nclust = K
     # Run Final model
-    cNMF_model, cophcor, consensus_matrix = cNMF(data_scaled, nclust, n_iter_final, Ncores)
+    cNMF_model, cophcor, consensus_matrix = cNMF(data_scaled, nclust, n_final_iter, Ncores)
+    return cNMF_model
 
                 
     
