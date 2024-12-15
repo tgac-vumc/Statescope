@@ -173,12 +173,41 @@ class Statescope:
 # 1.2  Define Statescope Initialization
 #-------------------------------------------------------------------------------
 def Check_Bulk_Format(Bulk):
-    pass
+    if np.mean(Bulk) > 10:
+        print('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed')
+        Bulk = Bulk.apply(lambda x: x/sum(x)*10000,axis=0)
+    elif (Bulk < 0).any().any():
+        raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required')
+    return Bulk
+        
+    
 
-def Check_Signature_validity(Signature,Normalize=True):
-    pass
+def Check_Signature_validity(Signature):
+    if not 'IsMarker' in Signature.columns:
+        raise AssertionError('IsMarker column is missing in Signature')
 
 def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores = 10):
+    """ 
+        Intialized Statescope object with Bulk and (pre-defined) Signature
+
+        :param Statescope self Statescope
+        :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected
+                                      counts are expected: if linear,library size correciton is 
+                                      performed (to 10k counts per sample)
+
+        :param pandas.DataFrame or ad.AnnData or None: Cell type specific gene expresion matrix, if 
+                                                       None a predefined Signature is used by setting
+                                                       Tumor Type. 
+                                                       If AnnData, a phenotyped scRNAseq
+                                                       dataset is used with adata.obs.celltype as cell types
+                                                       Ff pandas.Dataframe, a custom signature can be used for 
+                                                       which the validity is checked
+
+        :param str TumorType: Tumor type to select predefined signature [default = '', choices = ['NSCLC','PDAC','PBMC']
+        :param int Ncores: Number of cores to use for parrallel computing [default = 19]
+
+        :returns: Statescope Statescope_object: Intialized Statescope object
+        """
     TumorTypes = ['NSCLC', 'PBMC', 'PDAC'] # import this list from external source
 
     # Check if Signature is specified
@@ -207,6 +236,8 @@ def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
     Signature = Signature.loc[Genes,:]
     Bulk = Bulk.loc[Genes,:]
+    # Check bulk Format
+    Bulk = Check_Bulk_Format(Bulk)
     Markers = Signature[Signature.IsMarker].index.tolist()
     Omega_columns = ['scVar_'+ct for ct in Celltypes]
     Mu_columns = ['scExp_'+ct for ct in Celltypes]
