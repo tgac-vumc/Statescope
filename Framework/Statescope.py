@@ -25,18 +25,20 @@ Statescope_model.StateDiscovery()
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
+from BLADE_Deconvolution.CreateSignature import CreateSignature
 from BLADE_Deconvolution.BLADE import Framework_Iterative,Purify_AllGenes
 from StateDiscovery.cNMF import StateDiscovery_FrameWork
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
 from collections.abc import Iterable
+import anndata as ad
 from glob import glob
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
 #-------------------------------------------------------------------------------
-class Statescope_Object:
+class Statescope:
     def __init__(self, Bulk, scExp,scVar,Samples,Celltypes,Genes,Markers,Ncores):
         self.Bulk = Bulk
         self.scExp = scExp
@@ -54,7 +56,7 @@ class Statescope_Object:
                         Expectation=None, Temperature=None, IterMax=100):
         """ 
         Perform BLADE Deconvolution
-        :param Statescope_Object self: Initialized Statescope_Object
+        :param Statescope self: Initialized Statescope
         :param int Alpha: BLADE Hyperparameter [default = 1]
         :param int Alpha0: BLADE Hyperparameter [default = 1000]
         :param int Kappa0: BLADE Hyperparameter [default = 1]
@@ -92,7 +94,7 @@ class Statescope_Object:
     def Refinement(self,weight=100):
         """ 
         Perform Gene expression refinement with all genes
-        :param Statescope_Object self: Statescope_Object
+        :param Statescope self: Statescope
         :param int Njob: Number of parralel jobs [default = 10]
         :param int weight: Parameter to weigh down fraction estimation objective [default = 100]
 
@@ -122,7 +124,7 @@ class Statescope_Object:
         by default all cell types are used and the optimal K is determined
         ctSpecific GEX is by default weighed by Omega
 
-        :param Statescope_Object self Statescope_Object
+        :param Statescope self Statescope
         :param str celltype: cell type to perform state discovery [default = '' (All)]
         :param int K: number of states to return, by default the optimal K is chosen [None]
         :param str weighing: [default = 'Omega', choices: ['Omega','OmegaFractions','centering','no_weighing']]
@@ -170,24 +172,36 @@ class Statescope_Object:
 #-------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
 #-------------------------------------------------------------------------------
-
-
 def Check_Bulk_Format(Bulk):
     pass
 
+def Check_Signature_validity(Signature,Normalize=True):
+    pass
 
 def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores = 10):
-    TumorTypes = ['NSCLC', 'PBMC', 'PDAC']
+    TumorTypes = ['NSCLC', 'PBMC', 'PDAC'] # import this list from external source
+
+    # Check if Signature is specified
     if not TumorType  and Signature == None:
-        raise AssertionError("Signature is not specified")
+        raise AssertionError("Signature is not specified. Create custom signature or select a pre-defined signature")
+    # If Signature is specified
     elif Signature:
-        pass
+        # Check if Signature is custom pd.DataFrame
+        if isinstance(Signature, pd.DataFrame): 
+            Check_Signature_validity(Signature)
+        elif  isinstance(Signature, ad.AnnData):
+            # Create a Signature from phenotyped AnnData (with phenotypes in AnnData.obs[celltype.key])
+            Signature = CreateSignature(Signature)
+    
+    # If invalid predefined signature is specified 
     elif not TumorType in TumorTypes and Signature == None: 
         raise AssertionError(f"{TumorType} is not in {TumorTypes}. Specify custom Signature")
-    elif TumorType in TumorTypes:
-        Signature = pd.read_csv(glob(f'Framework/BLADE_Deconvolution/Signatures/{TumorType}/{TumorType}_Signature_{Ncelltypes}*celltypes.txt')[0],sep ='\t', index_col = 'Gene')
-
     
+    # Use predefine Signature
+    elif TumorType in TumorTypes:
+        Signature = pd.read_csv(glob(f'Framework/BLADE_Deconvolution/Signatures/{TumorType}/{TumorType}_Signature_{Ncelltypes}*celltypes.txt')[0],sep ='\t', index_col = 'Gene') # read from external source
+
+    # Fetch Statescope variables
     Samples = Bulk.columns.tolist()
     Celltypes =  [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col ]
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
@@ -196,10 +210,16 @@ def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores
     Markers = Signature[Signature.IsMarker].index.tolist()
     Omega_columns = ['scVar_'+ct for ct in Celltypes]
     Mu_columns = ['scExp_'+ct for ct in Celltypes]
-    Statescope_object = Statescope_Object(Bulk,Signature[Mu_columns],Signature[Omega_columns],Samples,Celltypes,Genes,Markers,Ncores)
+    
+    Statescope_object = Statescope(Bulk,Signature[Mu_columns],Signature[Omega_columns],Samples,Celltypes,Genes,Markers,Ncores)
     return Statescope_object
 
-    
+
+
+#-------------------------------------------------------------------------------
+# 1.2  Cteate Signature
+#-------------------------------------------------------------------------------
+
 #-------------------------------------------------------------------------------
 # 1.3  Define Statescope plotting functions
 #-------------------------------------------------------------------------------
