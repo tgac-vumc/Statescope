@@ -161,7 +161,7 @@ class Statescope:
         # alternatively, perform State discovery for one cell type
         else:
             # save cNMF models as single cNMF instance
-            self.cNMF = StateDiscovery_FrameWork(self.GEX[ct],self.Omega[ct],self.Fractions,celltype,weighing,K,n_iter,n_final_iter,min_cophentic,max_clusters,self.Ncores)
+            self.cNMF = StateDiscovery_FrameWork(self.GEX[celltype],self.Omega[celltype],self.Fractions,celltype,weighing,K,n_iter,n_final_iter,min_cophentic,max_clusters,self.Ncores)
             # save State scores and loadings
             self.StateScores = pd.DataFrame(cNMF.H, index = self.Samples).add_prefix(celltype)
             self.StateLoadings =pd.DataFrame(cNMF.W, index = self.Genes).add_prefix(celltype)
@@ -178,6 +178,7 @@ def Check_Bulk_Format(Bulk):
         Bulk = Bulk.apply(lambda x: x/sum(x)*10000,axis=0)
     elif (Bulk < 0).any().any():
         raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required')
+        
     return Bulk
         
     

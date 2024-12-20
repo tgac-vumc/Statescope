@@ -19,16 +19,18 @@
 import anndata as ad
 import pandas as pd
 import numpy as np
-import autogenes as ag
+import subprocess
+#import autogenes as ag
 
 #-------------------------------------------------------------------------------
 # 1.1  Define functions
 #-------------------------------------------------------------------------------
-def CreateSignature(adata, celltype_key = 'celltype'):
+def CreateSignature(adata, celltype_key = 'celltype', CorrectVariance = True):
     """ 
     Create Signature from AnnData object
     :param AnnData adata: phenotyped scRNAseq data with: adata.X (log, library-size corrected) 
     :param str celltype_key: column in adata.obs containing cell phenotypes [default = 'celltype']
+    :param bool CorrectVariance: Whether to run scran fitTrendVar in R to correct variance [default = True]
     
     :returns: pandas.DataFrame Signature: Signature for deconvolution
     """
@@ -37,6 +39,16 @@ def CreateSignature(adata, celltype_key = 'celltype'):
     # Calculate mean and std expression in cell types
     scExp = pd.concat([pd.DataFrame(np.mean(adata[adata.obs.celltype == ct].X.toarray(),0).transpose(),columns=['scExp_'+ct], index = adata.var_names) for ct in celltypes], axis=1)
     scVar = pd.concat([pd.DataFrame(np.std(adata[adata.obs.celltype == ct].X.toarray(),0).transpose(),columns=['scExp_'+ct], index = adata.var_names) for ct in celltypes], axis=1).replace(0,0.001) # replace 0s with small pseudovalue
+    # Correct variance
+    if CorrectVariance == True:
+        # Write to file
+        scExp.to_csv('.tmp_Exp.txt', sep = '\t')
+        scVar.to_csv('.tmp_Var.txt', sep = '\t')
+        # Run R code
+        subprocess.call("Rscript --vanilla Framework/BLADE_Deconvolution/CorrectVariance.R --input_mean .tmp_Exp.txt --input_var .tmp_Var.txt --output .tmp_CorrVar.txt", shell=True)
+        # Read corrected variance
+        scVar = pd.read_csv('.tmp_CorrVar.txt', sep = '\t')
+        
     # Run AutoGeneS and define markers
     AutoGeneS = Run_AutoGeneS(adata,celltype_key)
     IsMarker = pd.DataFrame({'IsMarker':[(gene in AutoGeneS) for gene in adata_var_names]},index = adata.var_names)
