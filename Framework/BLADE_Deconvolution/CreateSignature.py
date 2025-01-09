@@ -21,7 +21,6 @@
 import anndata as ad
 import pandas as pd
 import numpy as np
-import subprocess
 from scipy.optimize import curve_fit
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import autogenes as ag
@@ -77,52 +76,71 @@ def fitTrendVar(means,variances, min_mean = 0.1,frac = 0.025, parametric=True, l
     corrected_fit = unscaled_fun(means)
     return  corrected_fit
 
+def Check_adata_validity(adata):
+    # Check X (negative values, large values etc.), maybe check number of cells per celltype,
+    pass
 
-
-def CreateSignature(adata, celltype_key = 'celltype', CorrectVariance = True):
+def CreateSignature(adata, celltype_key = 'celltype', CorrectVariance = True,n_highly_variable = 3000):
     """ 
     Create Signature from AnnData object
     :param AnnData adata: phenotyped scRNAseq data with: adata.X (log, library-size corrected) 
     :param str celltype_key: column in adata.obs containing cell phenotypes [default = 'celltype']
     :param bool CorrectVariance: Whether to run scran fitTrendVar in R to correct variance [default = True]
+    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection [default = 3000]
+
     
     :returns: pandas.DataFrame Signature: Signature for deconvolution
     """
     # define celltypes
+    # raise exception when celltype key not in adata.obs
+    if not celltype_key in adata.obs:
+        raise AssertionError(f"{celltype_key} is not in adata.obs. Specify which column contains the cell phenotypes")
     celltypes = pd.unique(adata.obs[celltype_key])
+    Check_adata_validity(adata)
+    
     # Calculate mean and std expression in cell types
     scExp = pd.concat([pd.DataFrame(np.mean(adata[adata.obs.celltype == ct].X.toarray(),0).transpose(),columns=['scExp_'+ct], index = adata.var_names) for ct in celltypes], axis=1)
-    scVar = pd.concat([pd.DataFrame(np.std(adata[adata.obs.celltype == ct].X.toarray(),0).transpose(),columns=['scExp_'+ct], index = adata.var_names) for ct in celltypes], axis=1).replace(0,0.001) # replace 0s with small pseudovalue
+    scVar = pd.concat([pd.DataFrame(np.std(adata[adata.obs.celltype == ct].X.toarray(),0).transpose(),columns=['scVar_'+ct], index = adata.var_names) for ct in celltypes], axis=1).replace(0,0.001) # replace 0s with small pseudovalue
     # Correct variance
     if CorrectVariance:
-        scVar = fitTrendVar(scExcp, scVar)
+        scVar = pd.concat([pd.DataFrame(np.var(adata[adata.obs.celltype == ct].X.toarray(),0).transpose(),columns=['scVar_'+ct], index = adata.var_names) for ct in celltypes], axis=1).replace(0,0.001)
+        scVar = pd.concat([fitTrendVar(scExp['scExp_'+celltype],scVar['scVar_'+celltype]) for celltype in celltypes], axis = 1).replace(0,0.001)
+        # replace colnames
+        scVar.columns = [col.replace('scExp','scVar') for col in scVar.columns]
+    
     # Run AutoGeneS and define markers
-    AutoGeneS = Run_AutoGeneS(adata,celltype_key)
-    IsMarker = pd.DataFrame({'IsMarker':[(gene in AutoGeneS) for gene in adata_var_names]},index = adata.var_names)
+    AutoGeneS = Run_AutoGeneS(adata,celltype_key,n_highly_variable)
+    IsMarker = pd.DataFrame({'IsMarker':[(gene in AutoGeneS) for gene in adata.var_names]},index = adata.var_names)
     # Concatenate dataframes
-    Signature = pd.concat([IsMarker,scExp,scVar],index=1)
+    Signature = pd.concat([IsMarker,scExp,scVar],axis=1)
+    Signature.index = adata.var_names
     return Signature
 
-def Run_AutoGeneS(adata,celltype_key):
+def Run_AutoGeneS(adata,celltype_key,n_highly_variable = 3000):
     """ 
     Perform AutoGeneS marker selection from AnnData object
     :param AnnData adata: phenotyped scRNAseq data with: adata.X (log, library-size corrected) 
     :param str celltype_key: column in adata.obs containing cell phenotypes [default = 'celltype']
+    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection [default = 3000]
+
     
     :returns: list AutoGeneS: list of marker genes
     """
+    # Subset adata to top n hvgs
+    hvgs = pd.DataFrame(adata.X.toarray().transpose(),index = adata.var_names).apply(np.var, axis = 1).sort_values().nlargest(n_highly_variable).index
+    adata = adata[:,hvgs]
     # define celltypes
     celltypes = pd.unique(adata.obs[celltype_key])
     centroids_sc_hv = pd.DataFrame(index=adata.var_names,columns=celltypes)
     # Calculate celltype centroids
     for celltype in celltypes:
-        adata_filtered = adata[adata.obs[args.celltype_level] == celltype]
+        adata_filtered = adata[adata.obs[celltype_key] == celltype]
         sc_part = adata_filtered.X.T
         centroids_sc_hv[celltype] = pd.DataFrame(np.mean(sc_part,axis=1),index=adata.var_names)
     # Run AutogeneS
     ag.init(centroids_sc_hv.T)
     ag.optimize(ngen=5000,seed=0,offspring_size=100,verbose=False)
     # Fetch AutoGeneS in list
-    AutoGenes = ag.select(index=0).tolist()
+    AutoGenes = centroids_sc_hv[ag.select(index=0)].index.tolist()
     return AutoGenes
     

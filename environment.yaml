@@ -1,0 +1,20 @@
+name: Statescope
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - numpy
+  - pandas<2.0.0
+  - numba
+  - scikit-learn
+  - scipy
+  - joblib
+  - matplotlib
+  - statsmodels
+  - autogenes
+  - multiprocess
+  - anndata>=0.7
+  - pytorch
+  - torchvision
+  - cudatoolkit
+  - seaborn

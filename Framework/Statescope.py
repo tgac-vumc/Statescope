@@ -31,6 +31,7 @@ from StateDiscovery.cNMF import StateDiscovery_FrameWork
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
+import numpy as np
 from collections.abc import Iterable
 import anndata as ad
 from glob import glob
@@ -88,19 +89,23 @@ class Statescope:
         self.BLADE = final_obj
         # Save fractions as dataframe in object
         self.Fractions = pd.DataFrame(final_obj.ExpF(final_obj.Beta), index = self.Samples,columns = self.Celltypes)
+        # Add bool
+        self.DeconvolutionDone = True
 
         
-    # Do Gene Expression Refinement
-    def Refinement(self,weight=100):
+    # Perform Gene Expression Refinement
+    def Refinement(self,weight=100,GeneList = None):
         """ 
         Perform Gene expression refinement with all genes
         :param Statescope self: Statescope
-        :param int Njob: Number of parralel jobs [default = 10]
         :param int weight: Parameter to weigh down fraction estimation objective [default = 100]
+        :param list GeneList: Genes to use for refinement [default = None, all genes]
 
         :returns: BLADE_Object self.BLADE_final: BLADE object
         :returns: {ct:pandas.DataFrame} self.GEX: Dictionary of cell type specific GEX {ct:ctSpecificGEX}
         """
+        if GeneList:
+            self.Genes = [gene for gene in Genes if gene in GeneList]
         # Prepare Signature
         scExp_All = self.scExp.loc[self.Genes, :].to_numpy()
         scVar_All = self.scVar.loc[self.Genes, :].to_numpy()
@@ -117,7 +122,7 @@ class Statescope:
         self.Omega = Omega
 
     # Perform State Discovery
-    def StateDiscovery(self, celltype = '',
+    def StateDiscovery(self, celltype = [''],
                        K = [None],weighing = 'Omega',n_iter = 10,n_final_iter = 100,min_cophenetic = 0.9,max_clusters=10):
         """ 
         Perform StateDiscovery from ctSpecificGEX using cNMF
@@ -132,11 +137,11 @@ class Statescope:
         :param int n_iter_final: Number of final cNMF restarts [default = 100]
         :param float min_cophenetic: minimum cophentic coeffient to determine K [default = 0.9]
         :param int max_cluster: maximum number of states to consider [default = 10]
-        :param int Ncores: Number of cores to use for parrallel restarts [default = 19]
+        :param int Ncores: Number of cores to use for parrallel restarts [default = 10]
 
         :returns: CNMF_object self.cNMF: cNMF object
         :returns: StateScores self.StateScores: cNMF state scores from all cell types compiled (NSample x (NcellxNState))
-        :returns: StateLoadings self.StateLoadings: cNMF state loadings from all cell types compiled (NGene x (NcellxNState))
+        :returns: StateLoadings self.StateLoadings: cNMF state loadings from all cell types compiled (Ngene x (NcellxNState))
         """
         if celltype == '':
             celltype = self.Celltypes
@@ -172,8 +177,9 @@ class Statescope:
 #-------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
 #-------------------------------------------------------------------------------
+# Function to check Bulk format
 def Check_Bulk_Format(Bulk):
-    if np.mean(Bulk) > 10:
+    if np.mean(Bulk > 10).any():
         print('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed')
         Bulk = Bulk.apply(lambda x: x/sum(x)*10000,axis=0)
     elif (Bulk < 0).any().any():
@@ -182,12 +188,14 @@ def Check_Bulk_Format(Bulk):
     return Bulk
         
     
-
+# Function to check if custom Signature is valid
 def Check_Signature_validity(Signature):
-    if not 'IsMarker' in Signature.columns:
-        raise AssertionError('IsMarker column is missing in Signature')
+    if isinstance(Signature, pd.DataFrame):
+        if not 'IsMarker' in Signature.columns:
+            raise AssertionError('IsMarker column is missing in Signature')
+        
 
-def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores = 10):
+def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',MarkerList = None,celltype_key = 'celltype',n_highly_variable = 3000, Ncores = 10):
     """ 
         Intialized Statescope object with Bulk and (pre-defined) Signature
 
@@ -205,55 +213,75 @@ def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Ncores
                                                        which the validity is checked
 
         :param str TumorType: Tumor type to select predefined signature [default = '', choices = ['NSCLC','PDAC','PBMC']
+        :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection [default = 3000]
         :param int Ncores: Number of cores to use for parrallel computing [default = 19]
+        :param list MarkerList: Predefined list of markers to use for deconvolution [default = None, all Markers identified by AutoGeneS]
 
         :returns: Statescope Statescope_object: Intialized Statescope object
         """
     TumorTypes = ['NSCLC', 'PBMC', 'PDAC'] # import this list from external source
 
     # Check if Signature is specified
-    if not TumorType  and Signature == None:
-        raise AssertionError("Signature is not specified. Create custom signature or select a pre-defined signature")
-    # If Signature is specified
-    elif Signature:
+    if Signature:
         # Check if Signature is custom pd.DataFrame
         if isinstance(Signature, pd.DataFrame): 
             Check_Signature_validity(Signature)
+            
         elif  isinstance(Signature, ad.AnnData):
             # Create a Signature from phenotyped AnnData (with phenotypes in AnnData.obs[celltype.key])
-            Signature = CreateSignature(Signature)
-    
+            Signature = CreateSignature(Signature, celltype_key = celltype_key)
+    elif not TumorType  and Signature == None:
+        raise AssertionError("Signature is not specified. Create custom signature or select a pre-defined signature")
     # If invalid predefined signature is specified 
     elif not TumorType in TumorTypes and Signature == None: 
         raise AssertionError(f"{TumorType} is not in {TumorTypes}. Specify custom Signature")
-    
     # Use predefine Signature
     elif TumorType in TumorTypes:
-        Signature = pd.read_csv(glob(f'Framework/BLADE_Deconvolution/Signatures/{TumorType}/{TumorType}_Signature_{Ncelltypes}*celltypes.txt')[0],sep ='\t', index_col = 'Gene') # read from external source
+        Signature = pd.read_csv('https://github.com/tgac-vumc/StatescopeSignatures/{TumorType}/{TumorType}_Signature_{Ncelltypes}celltypes.txt',sep ='\t', index_col = 'Gene') # read from external source
 
     # Fetch Statescope variables
     Samples = Bulk.columns.tolist()
     Celltypes =  [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col ]
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
+        
     Signature = Signature.loc[Genes,:]
     Bulk = Bulk.loc[Genes,:]
     # Check bulk Format
     Bulk = Check_Bulk_Format(Bulk)
     Markers = Signature[Signature.IsMarker].index.tolist()
+    if MarkerList:
+        Markers = [gene for gene in Genes if gene in MarkerList]
+    
     Omega_columns = ['scVar_'+ct for ct in Celltypes]
     Mu_columns = ['scExp_'+ct for ct in Celltypes]
     
     Statescope_object = Statescope(Bulk,Signature[Mu_columns],Signature[Omega_columns],Samples,Celltypes,Genes,Markers,Ncores)
     return Statescope_object
 
-
-
 #-------------------------------------------------------------------------------
-# 1.2  Cteate Signature
-#-------------------------------------------------------------------------------
-
-#-------------------------------------------------------------------------------
-# 1.3  Define Statescope plotting functions
+# 1.2  Define Statescope plotting functions
 #-------------------------------------------------------------------------------
 def Heatmap_Fractions(Statescope_model):
+    pass
+
+def Heatmap_GEX(Statescope_model, celltype):
+    pass
+
+def Heatmap_StateLoadings():
+    pass
+
+def Heatmap_StateScores():
+    pass
+
+
+
+
+#-------------------------------------------------------------------------------
+# 1.3  Miscellaneous functions
+#-------------------------------------------------------------------------------
+# Extract Gene expression matrix
+def Extract_GEX(Statescope, celltype):
+    return Statescope.GEX[celltype]
+
+def Extract_StateScores(Statescope):
     pass
