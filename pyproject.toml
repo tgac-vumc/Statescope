@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Statescope"
+version = "0.0.9"
+description = "Statescope framework to uncover cell states from bulk RNA-seq and DNA-seq data"
+readme = "README.md"
+authors = [
+    {name = "Jurriaan Janssen", email = "j.janssen4@amsterdamumc.nl"},
+    {name = "Mischa Steketee", email="m.f.b.steketee@amsterdamumc.nl"},
+    {name = "Aryamaan Bose", email="a.bose1@amsterdamumc.nl"},
+    {name = "Yongsoo Kim", email="yo.kim@amsterdamumc.nl"}
+]
+license = {file = "LICENSE"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.6"
+dependencies = [
+    "numba",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "joblib",
+    "pandas<2.0.0",
+    "matplotlib",
+    "statsmodels",
+    "autogenes",
+    "multiprocess",
+    "anndata>0.7",
+    "pytorch",
+    "torchvision",
+    "cudatoolkit",
+    "seaborn"
+]
+
+[project.urls]
+Homepage = "https://statescope.netlify.app/"
+Repository = "https://github.com/tgac-vumc/Statescope"
+
+[tool.setuptools]
+packages = ["Statescope"]
+
