@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Statescope"
-version = "0.1.0"
+version = "0.1.5"
 description = "Statescope framework to uncover cell states from bulk RNA-seq and DNA-seq data"
 readme = "README.md"
 authors = [
@@ -30,14 +30,12 @@ dependencies = [
     "scikit-learn",
     "joblib",
     "pandas<2.0.0",
-    "matplotlib",
     "statsmodels",
     "autogenes",
     "multiprocess",
     "anndata>0.7",
-    "pytorch",
+    "torch",
     "torchvision",
-    "cudatoolkit",
     "seaborn"
 ]
 
