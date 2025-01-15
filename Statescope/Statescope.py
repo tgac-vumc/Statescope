@@ -35,7 +35,8 @@ import numpy as np
 from collections.abc import Iterable
 import anndata as ad
 from glob import glob
-
+import seaborn as sns
+import matplotlib.pyplot as plt
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
 #-------------------------------------------------------------------------------
@@ -195,7 +196,111 @@ def Check_Signature_validity(Signature):
             raise AssertionError('IsMarker column is missing in Signature')
         
 
-def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',MarkerList = None,celltype_key = 'celltype',n_highly_variable = 3000, Ncores = 10):
+import requests
+from io import StringIO
+import os  
+
+def fetch_signature(tumor_type, n_celltypes):
+    """Fetches the signature file directly from GitHub based on tumor type and number of cell types."""
+    file_name = f"{tumor_type}_Signature_{n_celltypes}celltypes.txt"
+    file_url = f"https://raw.githubusercontent.com/tgac-vumc/StatescopeData/master/{tumor_type}/{file_name}"
+    try:
+        response = requests.get(file_url)
+        response.raise_for_status()
+        return pd.read_csv(StringIO(response.text), sep='\t', index_col='Gene')
+    except requests.HTTPError:
+        return None
+
+#####UPDATE the token after 31/12/2025
+
+
+def list_available_signatures():
+    base_url = "https://api.github.com/repos/tgac-vumc/StatescopeData/contents/"
+    
+    # Try without the token first
+    response = requests.get(base_url)
+    data = response.json()
+
+    if 'message' in data and 'API rate limit exceeded' in data['message']:
+        # If rate limit exceeded, try using the environment token
+        token = os.getenv('GITHUB_TOKEN')
+        if not token:
+            print("API rate limit exceeded. No environment token found.")
+            print("Learn how to create and set a GitHub token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token")
+            return {}
+        
+        # Use the token from environment
+        headers = {'Authorization': f'token {token}'}
+        response = requests.get(base_url, headers=headers)
+        data = response.json()
+        if 'message' in data and 'API rate limit exceeded' in data['message']:
+            print("API rate limit exceeded, even using the environment GitHub token.")
+            print("Learn how to create and set a GitHub token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token")
+            return {}
+
+    available_signatures = {}
+    if isinstance(data, list):
+        for folder in data:
+            if 'type' in folder and folder['type'] == 'dir':
+                tumor_type = folder['name']
+                files_url = folder['url']
+                files_response = requests.get(files_url, headers=headers if 'Authorization' in locals() else {})
+                files_data = files_response.json()
+                cell_types = [file['name'].split('_')[-1].replace('celltypes.txt', '') for file in files_data if 'Signature' in file['name']]
+                available_signatures[tumor_type] = cell_types
+    else:
+        print("Unexpected data structure received from GitHub API:", data)
+    return available_signatures
+
+
+
+
+def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10):
+    available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
+
+    if Signature:
+        if isinstance(Signature, pd.DataFrame):
+            Check_Signature_validity(Signature)
+        elif isinstance(Signature, ad.AnnData):
+            Signature = CreateSignature(Signature, celltype_key=celltype_key)
+    elif TumorType == '' or TumorType not in available_signatures:
+        error_msg = "TumorType not specified or invalid. Available options include:\n"
+        for t, cells in available_signatures.items():
+            error_msg += f"{t}: {', '.join(cells)} cell types\n"
+        raise ValueError(error_msg)
+
+    if Ncelltypes == '':
+        # Select the signature with the smallest number of cell types if Ncelltypes is not specified
+        Ncelltypes = min(available_signatures[TumorType], key=int)
+
+    Signature = fetch_signature(TumorType, Ncelltypes)
+    if Signature is None:
+        error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
+        error_msg += ', '.join(available_signatures[TumorType])
+        raise ValueError(error_msg)
+
+    # Continue with the initialization as before
+    Samples = Bulk.columns.tolist()
+    Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
+    Genes = [gene for gene in Bulk.index if gene in Signature.index]
+
+    Signature = Signature.loc[Genes, :]
+    Bulk = Bulk.loc[Genes, :]
+    Bulk = Check_Bulk_Format(Bulk)
+    Markers = Signature[Signature.IsMarker].index.tolist()
+    if MarkerList:
+        Markers = [gene for gene in Genes if gene in MarkerList]
+
+    Omega_columns = ['scVar_' + ct for ct in Celltypes]
+    Mu_columns = ['scExp_' + ct for ct in Celltypes]
+
+    Statescope_object = Statescope(Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores)
+    return Statescope_object
+
+
+
+
+def Initialize_Statescope2(Bulk, Signature=None,TumorType='',Ncelltypes='',MarkerList = None,celltype_key = 'celltype',n_highly_variable = 3000, Ncores = 10):
     """ 
         Intialized Statescope object with Bulk and (pre-defined) Signature
 
@@ -261,8 +366,22 @@ def Initialize_Statescope(Bulk, Signature=None,TumorType='',Ncelltypes='',Marker
 #-------------------------------------------------------------------------------
 # 1.2  Define Statescope plotting functions
 #-------------------------------------------------------------------------------
+
 def Heatmap_Fractions(Statescope_model):
-    pass
+    if not hasattr(Statescope_model, 'Fractions') or Statescope_model.Fractions is None:
+        raise ValueError("The Statescope model does not have Fractions data. Ensure Deconvolution has been run.")
+    elif Statescope_model.Fractions.empty:
+        raise ValueError("The Fractions DataFrame is empty. Check data initialization and deconvolution results.")
+
+    fractions = Statescope_model.Fractions
+
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(fractions, annot=True, fmt=".2f", cmap="viridis", cbar_kws={'label': 'Fraction'})
+    plt.title('Cell Type Fractions per Sample')
+    plt.ylabel('Sample')
+    plt.xlabel('Cell Type')
+    plt.tight_layout()
+    plt.show()
 
 def Heatmap_GEX(Statescope_model, celltype):
     pass
