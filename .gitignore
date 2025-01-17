@@ -7,3 +7,14 @@ scripts/__pycache__/
 tmp/
 */*/__pycache__/
 */*/*/*/*/__pycache__/
+
+
+# Ignore these files 
+*.ipynb
+__pycache__/
+*.h5ad
+*.pdf
+*.tsv
+*.mtx
+*.tar.gz
+*.pyc
