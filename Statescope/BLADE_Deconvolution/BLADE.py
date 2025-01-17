@@ -461,6 +461,7 @@ def g_PY_Beta_C(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
 
 
 class BLADE:
+    _cuda_message_printed = False
     def __init__(self, Y, SigmaY=0.05, Mu0=2, Alpha=1,
                  Alpha0=1, Beta0=1, Kappa0=1,
                  Nu_Init=None, Omega_Init=1, Beta_Init=None,
@@ -473,14 +474,13 @@ class BLADE:
             self.device = torch.device(device)
         
         
-        if torch.cuda.is_available():
-            print("CUDA is available. Using GPU for computation.")
-           
-        else:
-            print("CUDA is not available. Using CPU for computation.")
+        if not BLADE._cuda_message_printed:
+            if torch.cuda.is_available():
+                print("CUDA is available. Using GPU for computation.")
+            else:
+                print("CUDA is not available. Using CPU for computation.")
+            BLADE._cuda_message_printed = True  # Mark the message as printed
             
-        
-        
         # Convert Y to a tensor and move to the specified device
         self.weight = 1
         self.Y = torch.tensor(Y, dtype=torch.float64, device=self.device)
@@ -744,13 +744,13 @@ class BLADE:
         Init = torch.cat((self.Nu.flatten(), self.Omega.flatten(), self.Beta.flatten()))
         bounds = [(-np.inf, np.inf) if i < (self.Ncell*self.Ngene*self.Nsample) else (0.0000001, 100) for i in range(len(Init))]
 
-        s1 = timer()
+        #s1 = timer()
         out = scipy.optimize.minimize(
                 fun = loss, x0 = Init.cpu().numpy(), bounds = bounds, jac = grad,
-                options = {'disp': True, 'maxiter' : 1000},
+                options = {'disp': False, 'maxiter' : 1000},
                 method='L-BFGS-B')
-        e1 = timer()
-        print("        Time (s) scipy optimize", e1 - s1)
+        #e1 = timer()
+        #print("        Time (s) scipy optimize", e1 - s1)
 
         params = out.x
 
@@ -940,10 +940,9 @@ def SVR_Initialization(X, Y, Nus, Njob=1, fsel=0):
 
     return Init_Fraction, Ind_use
 
-
 def Iterative_Optimization(X, stdX, Y, Alpha, Alpha0, Kappa0, SY, Rep, Init_Fraction, Init_Trust=10,
                            Expected=None, iter=100, minDiff=1e-4, TempRange=None, Update_SigmaY=False):
-    s1 = timer()
+    # s1 = timer()
     Ngene, Nsample = Y.shape
     Ncell = X.shape[1]
 
@@ -956,51 +955,50 @@ def Iterative_Optimization(X, stdX, Y, Alpha, Alpha0, Kappa0, SY, Rep, Init_Frac
     Nu_Init = np.zeros((Nsample, Ngene, Ncell))
     for i in range(Nsample):
         Nu_Init[i, :, :] = X
-    e1 = timer()
-    print("    Time (s) Init part Iterative_optimization", e1 - s1)
+    # e1 = timer()
+    # print("    Time (s) Init part Iterative_optimization", e1 - s1)
 
     # Optimization without given Temperature
-    s2 = timer()
+    # s2 = timer()
     Beta_Init = np.random.gamma(shape=1, size=(Nsample, Ncell)) + t(Init_Fraction) * Init_Trust
     obj = BLADE(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0,
-                    Nu_Init, Omega_Init, Beta_Init)
+                Nu_Init, Omega_Init, Beta_Init)
 
     obj.Check_health()
     obj_func = [None] * iter
     obj_func[0] = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
-    e2 = timer()
-    print("    Time (s) second part of Iterative_optimization", e2 - s2)
+    # e2 = timer()
+    # print("    Time (s) second part of Iterative_optimization", e2 - s2)
 
     for i in range(1, iter):
-        s3 = timer()
+        # s3 = timer()
         obj.Optimize()
-        print(type(obj.Nu))
-        e3 = timer()
-        print("    Time (s) obj.Optimizer()", e3 - s3)
-        s4 = timer()
+        # print(type(obj.Nu))
+        # e3 = timer()
+        # print("    Time (s) obj.Optimizer()", e3 - s3)
+        # s4 = timer()
         obj.Update_Alpha_Group(Expected=Expected)
-        print(type(obj.Nu))
-        e4 = timer()
-        print("    Time (s) obj.Update_Alpha_Group", e4 - s4)
-        s5 = timer()
+        # print(type(obj.Nu))
+        # e4 = timer()
+        # print("    Time (s) obj.Update_Alpha_Group", e4 - s4)
+        # s5 = timer()
         if Update_SigmaY:
             obj.Update_SigmaY()
-        print(type(obj.Nu))
-        e5 = timer()
-        print("    Time (s) obj.Update_SigmaY()", e5 - s5)
+        # print(type(obj.Nu))
+        # e5 = timer()
+        # print("    Time (s) obj.Update_SigmaY()", e5 - s5)
 
-        s6 = timer()
+        # s6 = timer()
         obj_func[i] = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
-        #obj_func[i] = obj.E_step(torch.tensor(obj.Nu), torch.tensor(obj.Beta), torch.tensor(obj.Omega))
-        e6 = timer()
-        print("    Time (s) obj.E_step()", e6 - s6)
+        # obj_func[i] = obj.E_step(torch.tensor(obj.Nu), torch.tensor(obj.Beta), torch.tensor(obj.Omega))
+        # e6 = timer()
+        # print("    Time (s) obj.E_step()", e6 - s6)
 
         # Check convergence
         if torch.abs(obj_func[i] - obj_func[i - 1]) < minDiff:
             break
 
     return obj, obj_func, Rep
-
 
 def Framework_Iterative(X, stdX, Y, Ind_Marker=None,
                         Alpha=1, Alpha0=0.1, Kappa0=1, sY=1,
@@ -1021,42 +1019,37 @@ def Framework_Iterative(X, stdX, Y, Ind_Marker=None,
     Nsample_small = Y_small.shape[1]
 
     if Nmarker < Ngene:
-        print("start optimization using marker genes: " + str(Nmarker) +\
-            " genes out of " + str(Ngene) + " genes.")
+        print("start optimization using marker genes: " + str(Nmarker) +
+              " genes out of " + str(Ngene) + " genes.")
     else:
         print("all of " + str(Ngene) + " genes are used for optimization.")
 
     print('Initialization with Support vector regression')
-    s1 = timer()
+    # s1 = timer()
     Init_Fraction, Ind_use = SVR_Initialization(X_small, Y_small, Njob=Njob, Nus=[0.25, 0.5, 0.75])
-    e1 = timer()
-    print("Time (s) SVR_Init", e1-s1)
+    # e1 = timer()
+    # print("Time (s) SVR_Init", e1-s1)
 
-    if Temperature is None or Temperature is False: #  Optimization without the temperature
-        # Run the optimizations sequentially
-        s2 = timer()
+    if Temperature is None or Temperature is False:  # Optimization without the temperature
+        # s2 = timer()
         with parallel_backend('threading', n_jobs=Njob):
             outs = Parallel(n_jobs=Njob, verbose=10)(
                 delayed(Iterative_Optimization)(X_small[Ind_use,:], stdX_small[Ind_use,:], Y_small[Ind_use,:],
                     Alpha, Alpha0, Kappa0, sY, rep, Init_Fraction, Expected=Expectation, Init_Trust=Init_Trust, iter=IterMax,
-                    Update_SigmaY = Update_SigmaY)
+                    Update_SigmaY=Update_SigmaY)
                     for rep in range(Nrep)
                 )
-        #outs = [Iterative_Optimization(X_small[Ind_use, :], stdX_small[Ind_use, :], Y_small[Ind_use, :],
-        #                               Alpha, Alpha0, Kappa0, sY, rep, Init_Fraction,
-        #                               Expected=Expectation, Init_Trust=Init_Trust, iter=IterMax,
-        #                               Update_SigmaY=Update_SigmaY) for rep in range(Nrep)]
-        e2 = timer()
-        print("Time (s) Iterative Optim loop", e2-s2)
+        # e2 = timer()
+        # print("Time (s) Iterative Optim loop", e2-s2)
 
         ## Final BLADE results
-        s3 = timer()
+        # s3 = timer()
         outs, convs, Reps = zip(*outs)
         cri = [obj.E_step(obj.Nu, obj.Beta, obj.Omega).cpu().numpy() for obj in outs]
         out = outs[np.nanargmax(cri)]
         conv = convs[np.nanargmax(cri)]
-        e3 = timer()
-        print("Time (s) Final part framework", e3-s3)
+        # e3 = timer()
+        # print("Time (s) Final part framework", e3-s3)
     else:
         if Temperature is True:
             Temperature = [1, 100]
@@ -1076,11 +1069,8 @@ def Framework_Iterative(X, stdX, Y, Ind_Marker=None,
         cri = [obj.E_step(obj.Nu, obj.Beta, obj.Omega).cpu().numpy() for obj in outs]
         out = outs[np.nanargmax(cri)]
         conv = convs[np.nanargmax(cri)]
-        
-    
 
     return out, conv, zip(outs, cri), args
-
 
 
 #########NUMBA functions for purification########

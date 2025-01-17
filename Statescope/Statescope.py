@@ -37,6 +37,7 @@ import anndata as ad
 from glob import glob
 import seaborn as sns
 import matplotlib.pyplot as plt
+
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
 #-------------------------------------------------------------------------------
@@ -50,6 +51,10 @@ class Statescope:
         self.Genes = Genes
         self.Markers = Markers
         self.Ncores = Ncores
+
+        self.isDeconvolutionDone = False
+        self.isRefinementDone = False
+        self.isStateDiscoveryDone = False
 
 
     def Deconvolution(self, Ind_Marker=None,
@@ -91,7 +96,8 @@ class Statescope:
         # Save fractions as dataframe in object
         self.Fractions = pd.DataFrame(final_obj.ExpF(final_obj.Beta), index = self.Samples,columns = self.Celltypes)
         # Add bool
-        self.DeconvolutionDone = True
+        self.isDeconvolutionDone = True
+        print("Deconvolution completed successfully.")
 
         
     # Perform Gene Expression Refinement
@@ -105,6 +111,9 @@ class Statescope:
         :returns: BLADE_Object self.BLADE_final: BLADE object
         :returns: {ct:pandas.DataFrame} self.GEX: Dictionary of cell type specific GEX {ct:ctSpecificGEX}
         """
+        if not self.isDeconvolutionDone:
+            raise Exception("Deconvolution must be completed before Refinement.")
+        
         if GeneList:
             self.Genes = [gene for gene in Genes if gene in GeneList]
         # Prepare Signature
@@ -121,72 +130,78 @@ class Statescope:
         self.BLADE_final = obj
         self.GEX = GEX
         self.Omega = Omega
+        
+        self.isRefinementDone = True
+        print("Refinement completed successfully.")
 
-    # Perform State Discovery
-    def StateDiscovery(self, celltype = [''],
-                       K = [None],weighing = 'Omega',n_iter = 10,n_final_iter = 100,min_cophenetic = 0.9,max_clusters=10):
+
+    def StateDiscovery(self, celltype=None, K=None, weighing='Omega', n_iter=10, n_final_iter=100, min_cophenetic=0.9, max_clusters=10):
         """ 
-        Perform StateDiscovery from ctSpecificGEX using cNMF
-        by default all cell types are used and the optimal K is determined
-        ctSpecific GEX is by default weighed by Omega
+        Perform StateDiscovery from ctSpecificGEX using cNMF.
 
-        :param Statescope self Statescope
-        :param str celltype: cell type to perform state discovery [default = '' (All)]
-        :param int K: number of states to return, by default the optimal K is chosen [None]
-        :param str weighing: [default = 'Omega', choices: ['Omega','OmegaFractions','centering','no_weighing']]
-        :param int n_iter: Number of initial cNMF restarts [default = 10]
-        :param int n_iter_final: Number of final cNMF restarts [default = 100]
-        :param float min_cophenetic: minimum cophentic coeffient to determine K [default = 0.9]
-        :param int max_cluster: maximum number of states to consider [default = 10]
-        :param int Ncores: Number of cores to use for parrallel restarts [default = 10]
-
-        :returns: CNMF_object self.cNMF: cNMF object
-        :returns: StateScores self.StateScores: cNMF state scores from all cell types compiled (NSample x (NcellxNState))
-        :returns: StateLoadings self.StateLoadings: cNMF state loadings from all cell types compiled (Ngene x (NcellxNState))
+        :param celltype: List of cell types or a single cell type for which to perform state discovery.
+                        If None, will use all available cell types from the data.
+        :param K: List or single value of number of states to consider for each cell type.
+                If None, an optimal K is determined.
+        :param weighing: Method to weigh the data, default is 'Omega'.
+        :param n_iter: Number of initial cNMF restarts.
+        :param n_final_iter: Number of final cNMF restarts.
+        :param min_cophenetic: Minimum cophenetic coefficient to determine K.
+        :param max_clusters: Maximum number of clusters/states to consider.
         """
-        if celltype == '':
-            celltype = self.Celltypes
-            K = K * len(celltype)
-        # by default, perform State Discovery for all celltypes
-        if isinstance(celltype, Iterable):
-            State_dict = dict()
-            # Iterate over celltypes (can be done in parallel)
-            for ct,k in zip(celltype,K):
-                # save cNMF models in State dict
-                State_dict[ct] = StateDiscovery_FrameWork(self.GEX[ct],self.Omega[ct],self.Fractions,ct,weighing,k,n_iter,n_final_iter,min_cophenetic,max_clusters,self.Ncores)
-            # save cNMF models as dict
-            self.cNMF = State_dict
-            # Save State scores and loadings as compile pandas.DataFrame
-            StateScores = pd.DataFrame()
-            StateLoadings = pd.DataFrame()
-            for ct,cNMF in State_dict.items():
-                StateScores = pd.concat([StateScores,pd.DataFrame(cNMF.H.transpose(),index = self.Samples).add_prefix(ct+'_')], axis = 1)
-                StateLoadings = pd.concat([StateLoadings,pd.DataFrame(cNMF.W,index = self.Genes).add_prefix(ct+'_')], axis = 1)
-            self.StateLoadings =  StateLoadings
-            self.StateScores = StateScores
-        # alternatively, perform State discovery for one cell type
-        else:
-            # save cNMF models as single cNMF instance
-            self.cNMF = StateDiscovery_FrameWork(self.GEX[celltype],self.Omega[celltype],self.Fractions,celltype,weighing,K,n_iter,n_final_iter,min_cophentic,max_clusters,self.Ncores)
-            # save State scores and loadings
-            self.StateScores = pd.DataFrame(cNMF.H, index = self.Samples).add_prefix(celltype)
-            self.StateLoadings =pd.DataFrame(cNMF.W, index = self.Genes).add_prefix(celltype)
+        if not self.isRefinementDone:
+            raise Exception("Refinement must be completed before StateDiscovery.")
 
+        if celltype is None:
+            celltype = self.Celltypes  # Assume self.Celltypes is populated from initial data processing
+        if isinstance(celltype, str):
+            celltype = [celltype]  # Ensure celltype is iterable
 
+        if K is None:
+            K = [None] * len(celltype)
+        elif isinstance(K, int):
+            K = [K] * len(celltype)  # Broadcast K if it's a single integer
 
+        # Check for consistency in the length of lists if explicitly provided
+        if len(celltype) != len(K):
+            raise ValueError("Mismatch in the lengths of 'celltype' and 'K'.")
 
-#-------------------------------------------------------------------------------
+        State_dict = {}
+        StateScores = pd.DataFrame()
+        StateLoadings = pd.DataFrame()
+
+        for ct, k in zip(celltype, K):
+            State_dict[ct] = StateDiscovery_FrameWork(self.GEX[ct], self.Omega[ct], self.Fractions, ct, weighing, k, n_iter, n_final_iter, min_cophenetic, max_clusters, self.Ncores)
+            StateScores = pd.concat([StateScores, pd.DataFrame(State_dict[ct].H.transpose(), index=self.Samples).add_prefix(ct+'_')], axis=1)
+            StateLoadings = pd.concat([StateLoadings, pd.DataFrame(State_dict[ct].W, index=self.Genes).add_prefix(ct+'_')], axis=1)
+
+        self.cNMF = State_dict
+        self.StateScores = StateScores
+        self.StateLoadings = StateLoadings
+        self.isStateDiscoveryDone = True
+        print("StateDiscovery completed successfully.")
+    #-------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
 #-------------------------------------------------------------------------------
 # Function to check Bulk format
 def Check_Bulk_Format(Bulk):
+    # Check that Bulk is a DataFrame and has the expected structure
+    if not isinstance(Bulk, pd.DataFrame):
+        raise ValueError("Bulk should be a pandas DataFrame.")
+    if Bulk.empty:
+        raise ValueError("Bulk DataFrame is empty.")
+    if Bulk.ndim != 2:
+        raise ValueError("Bulk DataFrame is not two-dimensional.")
+
+    # Original checks and operations
     if np.mean(Bulk > 10).any():
-        print('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed')
-        Bulk = Bulk.apply(lambda x: x/sum(x)*10000,axis=0)
+        print('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.')
+        Bulk = Bulk.apply(lambda x: x / sum(x) * 10000, axis=0)
     elif (Bulk < 0).any().any():
-        raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required')
-        
+        raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required.')
+
     return Bulk
+
         
     
 # Function to check if custom Signature is valid
@@ -215,6 +230,7 @@ def fetch_signature(tumor_type, n_celltypes):
 
 
 def list_available_signatures():
+    """Lists the availaible signatures in the StatescopeData repository"""
     base_url = "https://api.github.com/repos/tgac-vumc/StatescopeData/contents/"
     
     # Try without the token first
@@ -252,10 +268,21 @@ def list_available_signatures():
         print("Unexpected data structure received from GitHub API:", data)
     return available_signatures
 
-
-
-
 def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10):
+    """ 
+    Initializes Statescope object with Bulk and (pre-defined) Signature.
+
+    :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected counts are expected.
+    :param pandas.DataFrame or ad.AnnData or None Signature: Cell type specific gene expression matrix.
+    :param str TumorType: Tumor type to select predefined signature.
+    :param str Ncelltypes: Number of cell types in the signature.
+    :param list MarkerList: Predefined list of markers to use for deconvolution.
+    :param str celltype_key: Key to use for cell type in AnnData.
+    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection.
+    :param int Ncores: Number of cores to use for parallel computing.
+
+    :returns: Statescope object initialized with the given parameters.
+    """
     available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
 
     if Signature:
@@ -263,23 +290,26 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
             Check_Signature_validity(Signature)
         elif isinstance(Signature, ad.AnnData):
             Signature = CreateSignature(Signature, celltype_key=celltype_key)
-    elif TumorType == '' or TumorType not in available_signatures:
-        error_msg = "TumorType not specified or invalid. Available options include:\n"
-        for t, cells in available_signatures.items():
-            error_msg += f"{t}: {', '.join(cells)} cell types\n"
-        raise ValueError(error_msg)
+    else:
+        if TumorType == '' or TumorType not in available_signatures:
+            error_msg = "TumorType not specified or invalid. Available options include:\n"
+            for t, cells in available_signatures.items():
+                error_msg += f"{t}: {', '.join(cells)} cell types\n"
+            raise ValueError(error_msg)
+        
+        if Ncelltypes == '':
+            # Select the signature with the smallest number of cell types if Ncelltypes is not specified
+            Ncelltypes = min(available_signatures[TumorType], key=int)
+        
+        Signature = fetch_signature(TumorType, Ncelltypes)
+        if Signature is None:
+            error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
+            error_msg += ', '.join(available_signatures[TumorType])
+            raise ValueError(error_msg)
+        
 
-    if Ncelltypes == '':
-        # Select the signature with the smallest number of cell types if Ncelltypes is not specified
-        Ncelltypes = min(available_signatures[TumorType], key=int)
 
-    Signature = fetch_signature(TumorType, Ncelltypes)
-    if Signature is None:
-        error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
-        error_msg += ', '.join(available_signatures[TumorType])
-        raise ValueError(error_msg)
-
-    # Continue with the initialization as before
+        # Continue with the initialization as before
     Samples = Bulk.columns.tolist()
     Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
@@ -294,113 +324,366 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
     Omega_columns = ['scVar_' + ct for ct in Celltypes]
     Mu_columns = ['scExp_' + ct for ct in Celltypes]
 
+    # Print the number of common markers
+    common_markers = set(Markers).intersection(Bulk.index)
+    print(f"Number of common markers between Bulk and Signature: {len(common_markers)}")
+
+    # Print the number of genes common between Bulk and Signature
+    common_genes = set(Genes).intersection(Signature.index)
+    print(f"Number of genes common between Bulk and Signature: {len(common_genes)}")
+
+
     Statescope_object = Statescope(Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores)
     return Statescope_object
 
-
-
-
-def Initialize_Statescope2(Bulk, Signature=None,TumorType='',Ncelltypes='',MarkerList = None,celltype_key = 'celltype',n_highly_variable = 3000, Ncores = 10):
-    """ 
-        Intialized Statescope object with Bulk and (pre-defined) Signature
-
-        :param Statescope self Statescope
-        :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected
-                                      counts are expected: if linear,library size correciton is 
-                                      performed (to 10k counts per sample)
-
-        :param pandas.DataFrame or ad.AnnData or None: Cell type specific gene expresion matrix, if 
-                                                       None a predefined Signature is used by setting
-                                                       Tumor Type. 
-                                                       If AnnData, a phenotyped scRNAseq
-                                                       dataset is used with adata.obs.celltype as cell types
-                                                       Ff pandas.Dataframe, a custom signature can be used for 
-                                                       which the validity is checked
-
-        :param str TumorType: Tumor type to select predefined signature [default = '', choices = ['NSCLC','PDAC','PBMC']
-        :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection [default = 3000]
-        :param int Ncores: Number of cores to use for parrallel computing [default = 19]
-        :param list MarkerList: Predefined list of markers to use for deconvolution [default = None, all Markers identified by AutoGeneS]
-
-        :returns: Statescope Statescope_object: Intialized Statescope object
-        """
-    TumorTypes = ['NSCLC', 'PBMC', 'PDAC'] # import this list from external source
-
-    # Check if Signature is specified
-    if Signature:
-        # Check if Signature is custom pd.DataFrame
-        if isinstance(Signature, pd.DataFrame): 
-            Check_Signature_validity(Signature)
-            
-        elif  isinstance(Signature, ad.AnnData):
-            # Create a Signature from phenotyped AnnData (with phenotypes in AnnData.obs[celltype.key])
-            Signature = CreateSignature(Signature, celltype_key = celltype_key)
-    elif not TumorType  and Signature == None:
-        raise AssertionError("Signature is not specified. Create custom signature or select a pre-defined signature")
-    # If invalid predefined signature is specified 
-    elif not TumorType in TumorTypes and Signature == None: 
-        raise AssertionError(f"{TumorType} is not in {TumorTypes}. Specify custom Signature")
-    # Use predefine Signature
-    elif TumorType in TumorTypes:
-        Signature = pd.read_csv('https://github.com/tgac-vumc/StatescopeSignatures/{TumorType}/{TumorType}_Signature_{Ncelltypes}celltypes.txt',sep ='\t', index_col = 'Gene') # read from external source
-
-    # Fetch Statescope variables
-    Samples = Bulk.columns.tolist()
-    Celltypes =  [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col ]
-    Genes = [gene for gene in Bulk.index if gene in Signature.index]
-        
-    Signature = Signature.loc[Genes,:]
-    Bulk = Bulk.loc[Genes,:]
-    # Check bulk Format
-    Bulk = Check_Bulk_Format(Bulk)
-    Markers = Signature[Signature.IsMarker].index.tolist()
-    if MarkerList:
-        Markers = [gene for gene in Genes if gene in MarkerList]
-    
-    Omega_columns = ['scVar_'+ct for ct in Celltypes]
-    Mu_columns = ['scExp_'+ct for ct in Celltypes]
-    
-    Statescope_object = Statescope(Bulk,Signature[Mu_columns],Signature[Omega_columns],Samples,Celltypes,Genes,Markers,Ncores)
-    return Statescope_object
 
 #-------------------------------------------------------------------------------
 # 1.2  Define Statescope plotting functions
 #-------------------------------------------------------------------------------
 
+
+def generate_color_map(state_columns):
+    """
+    Generates a consistent color map for cell types and their states with subtle shade variations.
+    
+    :param state_columns: List of state column names (e.g., ['CD4 T_0', 'CD4 T_1', 'Tumor_0']).
+    :returns: A dictionary mapping column names to colors.
+    """
+    # Extract unique cell types
+    unique_cell_types = sorted(set([col.split('_')[0] for col in state_columns]))
+    color_map = {}
+    
+    # Generate a base color palette for unique cell types
+    base_palette = sns.color_palette("tab20", len(unique_cell_types))  # Up to 20 cell types
+    cell_type_colors = {cell_type: base_palette[idx] for idx, cell_type in enumerate(unique_cell_types)}
+
+    for cell_type in unique_cell_types:
+        # Generate very similar shades for each cell type
+        base_color = cell_type_colors[cell_type]
+        shades = sns.light_palette(base_color, n_colors=10, reverse=False, input="rgb")
+        
+        # Assign a subtle shade to each state within the cell type
+        states = [col for col in state_columns if col.startswith(cell_type)]
+        for i, state in enumerate(states):
+            step = i / max(len(states) - 1, 1)  # Ensure at least one shade
+            color_map[state] = sns.blend_palette([base_color, (1, 1, 1)], n_colors=10, as_cmap=False)[int(step * 9)]
+
+    return color_map
+
 def Heatmap_Fractions(Statescope_model):
+    """
+    Visualizes the cell type fractions per sample using a clustered heatmap.
+    
+    :param Statescope_model: An instance of the Statescope class with Fractions data.
+    """
     if not hasattr(Statescope_model, 'Fractions') or Statescope_model.Fractions is None:
         raise ValueError("The Statescope model does not have Fractions data. Ensure Deconvolution has been run.")
-    elif Statescope_model.Fractions.empty:
+    if Statescope_model.Fractions.empty:
         raise ValueError("The Fractions DataFrame is empty. Check data initialization and deconvolution results.")
 
+    # Retrieve the fractions data
     fractions = Statescope_model.Fractions
 
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(fractions, annot=True, fmt=".2f", cmap="viridis", cbar_kws={'label': 'Fraction'})
+    # Generate a clustermap
+    g = sns.clustermap(fractions, annot=True, fmt=".2f", cmap="viridis",
+                       figsize=(12, 8), cbar_kws={'label': 'Fraction'},
+                       method='average')  # method can be 'single', 'complete', 'average', etc.
+
+    # Enhance the plot aesthetics
+    plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0)  # Rotate the y-axis labels for better readability
+    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=90) # Rotate the x-axis labels for better readability
+
     plt.title('Cell Type Fractions per Sample')
     plt.ylabel('Sample')
     plt.xlabel('Cell Type')
+
+    # Show the plot
+    plt.show()
+
+
+def Heatmap_GEX(Statescope_model, celltype):
+    """
+    Plots a clustered heatmap of the purified gene expression matrix for a specific cell type.
+
+    :param Statescope_model: The Statescope object containing refined gene expression data.
+    :param str celltype: The cell type for which the heatmap is to be plotted.
+
+    :raises KeyError: If the specified cell type is not found in the Statescope model's GEX dictionary.
+    :raises AttributeError: If the Statescope model does not have a GEX attribute or refinement is incomplete.
+    """
+    # Extract the GEX matrix
+    gex_matrix = Extract_GEX(Statescope_model, celltype)
+
+    # Plot the heatmap
+    plt.figure(figsize=(12, 8))
+    sns.clustermap(
+        gex_matrix,
+        cmap="viridis",
+        annot=False,
+        figsize=(12, 10),
+        xticklabels=gex_matrix.columns,
+        yticklabels=gex_matrix.index,
+        cbar_kws={'label': 'Expression Level'},
+        dendrogram_ratio=(0.2, 0.2)
+    )
+
+    # Reduce the size of the gene labels
+    plt.gcf().axes[2].tick_params(axis='x', rotation=90, labelsize=8)
+    plt.gcf().axes[2].tick_params(axis='y', labelsize=8)
+
+    plt.title(f"Clustered Heatmap of Gene Expression for Cell Type: {celltype}", pad=20)
     plt.tight_layout()
     plt.show()
 
-def Heatmap_GEX(Statescope_model, celltype):
-    pass
 
-def Heatmap_StateLoadings():
-    pass
+def Heatmap_StateLoadings(Statescope_model, top_genes=None):
+    """
+    Visualize the state loadings matrix with color-coded columns, 
+    grouping cell types and displaying their states more compactly.
 
-def Heatmap_StateScores():
-    pass
+    :param Statescope_model: The Statescope object containing StateLoadings.
+    :param int top_genes: Number of top genes to display (default is all genes).
+    """
+    # Extract the state loadings
+    state_loadings = Extract_StateLoadings(Statescope_model)
 
+    if top_genes:
+        # Select top genes by maximum loading
+        top_genes_list = state_loadings.abs().max(axis=1).nlargest(top_genes).index
+        state_loadings = state_loadings.loc[top_genes_list]
 
+    # Generate color map for columns
+    color_map = generate_color_map(state_loadings.columns)
+
+    # Separate cell types and states for compact x-axis labels
+    cell_states = state_loadings.columns
+    cell_types = [col.split('_')[0] for col in cell_states]
+    state_numbers = [col.split('_')[1] for col in cell_states]
+
+    # Prepare unique cell types and their state ranges for compact labeling
+    unique_cell_types = []
+    state_ranges = []
+    prev_cell_type = None
+    for ctype, state in zip(cell_types, state_numbers):
+        if ctype != prev_cell_type:
+            unique_cell_types.append(ctype)
+            state_ranges.append([state])
+            prev_cell_type = ctype
+        else:
+            state_ranges[-1].append(state)
+
+    # Format the state labels
+    compact_labels = []
+    for ctype, states in zip(unique_cell_types, state_ranges):
+        state_str = " ".join(states)
+        compact_labels.append((ctype, state_str))
+
+    # Create a DataFrame for `col_colors` matching the order of `state_loadings.columns`
+    col_colors = pd.DataFrame(
+        {"color": [color_map[col] for col in cell_states]},
+        index=cell_states
+    )
+
+    # Create clustered heatmap
+    g = sns.clustermap(
+        state_loadings,
+        cmap="viridis",
+        cbar_kws={"label": "State Loadings"},
+        col_colors=col_colors["color"].values,
+        xticklabels=False,  # Turn off default x-tick labels
+        yticklabels=True,
+        linewidths=0.5,
+        figsize=(14, 10)
+    )
+
+    # Add custom x-axis labels for cell types and states
+    ax = g.ax_heatmap
+
+    # Set x-ticks at midpoints of each cell type group
+    xticks = []
+    xlabels = []
+    for i, (ctype, states) in enumerate(compact_labels):
+        state_indices = [
+            idx for idx, col in enumerate(cell_types) if col == ctype
+        ]
+        midpoint = sum(state_indices) / len(state_indices)
+        xticks.append(midpoint)
+        xlabels.append(ctype)
+
+    # Set x-axis labels
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xlabels, fontsize=10, rotation=0)
+
+    # Add state numbers below
+    for x, (ctype, states) in zip(xticks, compact_labels):
+        ax.text(x, -1.5, states, ha="center", va="top", fontsize=8, color="black")
+
+    ax.set_xlabel("Cell Types and States")
+    ax.set_ylabel("Genes")
+
+    plt.title("State Loadings Heatmap", fontsize=12)
+    plt.show()
+
+def Heatmap_StateScores(Statescope_model):
+    """
+    Visualize the state scores matrix with color-coded columns, 
+    grouping cell types and displaying their states more compactly.
+
+    :param Statescope_model: The Statescope object containing StateScores.
+    """
+    # Extract the state scores
+    state_scores = Extract_StateScores(Statescope_model)
+
+    # Generate color map for columns
+    color_map = generate_color_map(state_scores.columns)
+
+    # Separate cell types and states for compact x-axis labels
+    cell_states = state_scores.columns
+    cell_types = [col.split('_')[0] for col in cell_states]
+    state_numbers = [col.split('_')[1] for col in cell_states]
+
+    # Prepare unique cell types and their state ranges for compact labeling
+    unique_cell_types = []
+    state_ranges = []
+    prev_cell_type = None
+    for ctype, state in zip(cell_types, state_numbers):
+        if ctype != prev_cell_type:
+            unique_cell_types.append(ctype)
+            state_ranges.append([state])
+            prev_cell_type = ctype
+        else:
+            state_ranges[-1].append(state)
+
+    # Format the state labels
+    compact_labels = []
+    for ctype, states in zip(unique_cell_types, state_ranges):
+        state_str = " ".join(states)
+        compact_labels.append((ctype, state_str))
+
+    # Create a DataFrame for `col_colors` matching the order of `state_scores.columns`
+    col_colors = pd.DataFrame(
+        {"color": [color_map[col] for col in cell_states]},
+        index=cell_states
+    )
+
+    # Create clustered heatmap
+    g = sns.clustermap(
+        state_scores,
+        cmap="viridis",
+        cbar_kws={"label": "State Scores"},
+        col_colors=col_colors["color"].values,
+        xticklabels=False,  # Turn off default x-tick labels
+        yticklabels=True,
+        linewidths=0.5,
+        figsize=(14, 10)
+    )
+
+    # Add custom x-axis labels for cell types and states
+    ax = g.ax_heatmap
+
+    # Set x-ticks at midpoints of each cell type group
+    xticks = []
+    xlabels = []
+    for i, (ctype, states) in enumerate(compact_labels):
+        state_indices = [
+            idx for idx, col in enumerate(cell_types) if col == ctype
+        ]
+        midpoint = sum(state_indices) / len(state_indices)
+        xticks.append(midpoint)
+        xlabels.append(ctype)
+
+    # Set x-axis labels
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xlabels, fontsize=10, rotation=0)
+
+    # Add state numbers below
+    for x, (ctype, states) in zip(xticks, compact_labels):
+        ax.text(x, -1.5, states, ha="center", va="top", fontsize=8, color="black")
+
+    ax.set_xlabel("Cell Types and States")
+    ax.set_ylabel("Samples")
+
+    plt.title("State Scores Heatmap", fontsize=12)
+    plt.show()
 
 
 #-------------------------------------------------------------------------------
 # 1.3  Miscellaneous functions
 #-------------------------------------------------------------------------------
 # Extract Gene expression matrix
-def Extract_GEX(Statescope, celltype):
-    return Statescope.GEX[celltype]
+def Extract_GEX(Statescope_model, celltype):
+    """
+    Extracts the purified gene expression matrix (GEX) for a specified cell type from a Statescope model.
 
-def Extract_StateScores(Statescope):
-    pass
+    :param Statescope_model: The Statescope object containing refined gene expression data.
+    :param str celltype: The cell type for which the GEX is to be extracted.
+
+    :returns: pandas.DataFrame containing the purified gene expression matrix for the specified cell type,
+              with sample names as rows and gene names as columns.
+    :raises KeyError: If the specified cell type is not found in the Statescope model's GEX dictionary.
+    :raises AttributeError: If the Statescope model does not have a GEX attribute or refinement is incomplete.
+    """
+    if not hasattr(Statescope_model, 'GEX'):
+        raise AttributeError("The Statescope model does not contain gene expression data. Ensure refinement has been completed.")
+    
+    if not Statescope_model.isRefinementDone:
+        raise Exception("Refinement must be completed before extracting gene expression data.")
+
+    if celltype in Statescope_model.GEX:
+        # Extract the GEX DataFrame for the specified cell type
+        gex_matrix = Statescope_model.GEX[celltype]
+
+        # Ensure the DataFrame retains the sample and gene names
+        gex_matrix.index = Statescope_model.Samples
+        gex_matrix.columns = Statescope_model.Genes
+        gex_matrix.index.name = 'Samples'
+        gex_matrix.columns.name = 'Genes'
+        return gex_matrix
+    else:
+        raise KeyError(f"Cell type '{celltype}' not found in the Statescope model. Available cell types: {list(Statescope_model.GEX.keys())}")
+
+def Extract_StateScores(Statescope_model):
+    """
+    Extracts the state scores from a Statescope model after StateDiscovery has been performed.
+
+    :param Statescope_model: The Statescope object containing state discovery results.
+    
+    :returns: pandas.DataFrame containing state scores for all samples and cell types.
+    :raises AttributeError: If StateDiscovery has not been completed or the StateScores attribute is missing.
+    """
+    # Check if StateDiscovery has been completed
+    if not hasattr(Statescope_model, 'StateScores') or Statescope_model.StateScores is None:
+        raise AttributeError("StateScores are not available. Please ensure that StateDiscovery has been completed.")
+
+    # Extract the StateScores DataFrame
+    state_scores = Statescope_model.StateScores
+
+    # Verify the DataFrame is not empty
+    if state_scores.empty:
+        raise ValueError("StateScores DataFrame is empty. Check if StateDiscovery was executed correctly.")
+
+    # Return the state scores
+    return state_scores
+
+def Extract_StateLoadings(Statescope_model):
+    """
+    Extracts the StateLoadings matrix for all cell types from a Statescope model.
+
+    :param Statescope_model: The Statescope object containing StateLoadings.
+    
+    :returns: pandas.DataFrame containing the state loadings with appropriate row (genes) 
+              and column (states) names.
+    :raises AttributeError: If the Statescope model does not have StateLoadings.
+    """
+    if not hasattr(Statescope_model, 'StateLoadings') or Statescope_model.StateLoadings is None:
+        raise AttributeError("The Statescope model does not contain StateLoadings. Please ensure that StateDiscovery has been completed.")
+
+    state_loadings = Statescope_model.StateLoadings
+
+    # Check if the row and column names are retained
+    if state_loadings.empty:
+        raise ValueError("The StateLoadings DataFrame is empty. Ensure StateDiscovery has produced valid results.")
+
+    print(f"StateLoadings matrix extracted successfully. Shape: {state_loadings.shape}")
+    return state_loadings
+
