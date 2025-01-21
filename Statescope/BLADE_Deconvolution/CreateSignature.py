@@ -78,7 +78,6 @@ def fitTrendVar(means,variances, min_mean = 0.1,frac = 0.025, parametric=True, l
     return  corrected_fit
 
 
-
 def Check_adata_validity(adata, celltype_key='celltype'):
     """
     Check the validity of an AnnData object and report descriptive statistics and potential issues.
@@ -95,14 +94,31 @@ def Check_adata_validity(adata, celltype_key='celltype'):
         has_negative_values = np.any(adata.X.data < 0)
     else:
         has_negative_values = np.any(adata.X < 0)
+    
+    if has_negative_values:
+        raise AssertionError("The data matrix (adata.X) contains negative values, which are not allowed.")
 
-    print("Warning: Negative values found in the data matrix (adata.X)." if has_negative_values else "No negative values found in the data matrix (adata.X).")
+    print("No negative values found in the data matrix (adata.X).")
 
+    ###CHECK AGAIN NEEDS FIXING 
+    ##max value set to 100 ##maybe redifne logic
+    # Check if the data is log-transformed using min and max values
+    data_min = adata.X.min() if not is_sparse else adata.X.data.min()
+    data_max = adata.X.max() if not is_sparse else adata.X.data.max()
+    
+    if data_min < 0 or data_max > 100:  # Assuming 1e6 as the upper range for raw counts
+        raise AssertionError("The data does not appear to be log-transformed. Please log-transform the data.")
+
+    print("Log-transformation check passed: Data appears to be log-transformed.")
+
+    # Check if the data is scaled to 1e4
+    total_counts = adata.X.sum(axis=1).A1 if is_sparse else adata.X.sum(axis=1)
+    
     # Check for excessively large values
     max_value = adata.X.max() if not is_sparse else adata.X.data.max()
     print(f"Maximum value in the data matrix (adata.X): {max_value}")
-    if max_value > 1e6:
-        print("Warning: Extremely large values detected in the data matrix (adata.X).")
+    if max_value > 100:
+        print("Warning: Extremely large values detected in the data matrix (adata.X). This might influence performance.")
 
     # Check the number of cells and genes
     num_cells, num_genes = adata.shape
@@ -110,7 +126,6 @@ def Check_adata_validity(adata, celltype_key='celltype'):
     print(f"Number of genes: {num_genes}")
 
     # Calculate total counts and check for outlier cells
-    total_counts = adata.X.sum(axis=1).A1 if is_sparse else adata.X.sum(axis=1)
     median_total_counts = np.median(total_counts)
     mad_total_counts = np.median(np.abs(total_counts - median_total_counts))
     upper_threshold = median_total_counts + 3 * mad_total_counts
@@ -129,7 +144,7 @@ def Check_adata_validity(adata, celltype_key='celltype'):
         print(f"Cell types present: {list(unique_cell_types)}")
         print(f"Number of unique cell types: {len(unique_cell_types)}")
     else:
-        print(f"No cell type information available under the specified key '{celltype_key}'.")
+        raise AssertionError(f"No cell type information available under the specified key '{celltype_key}'.")
 
     # Summary statistics for data matrix
     data_matrix = adata.X.data if is_sparse else adata.X
@@ -145,6 +160,7 @@ def Check_adata_validity(adata, celltype_key='celltype'):
         print(f"  {key}: {value}")
 
     print("\nValidation complete.")
+
 
 
 def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_highly_variable=3000):
@@ -164,6 +180,7 @@ def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_high
     print("\n=== Creating Signature ===")
 
     # Check if the celltype_key exists in adata.obs
+    ###move it to validity script
     if celltype_key not in adata.obs:
         raise AssertionError(f"{celltype_key} is not in adata.obs. Specify which column contains the cell phenotypes")
 

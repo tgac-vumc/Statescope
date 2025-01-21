@@ -4,7 +4,7 @@
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #
 # Statescope framework
-# Author: Jurriaan Janssen (j.janssen4@amsterdamumc.nl)
+# Author: Jurriaan Janssen (j.janssen4@amsterdamumc.nl), Aryamaan Bose (a.bose1@amsterdamumc.nl)
 #
 # Usage:
 """
@@ -22,6 +22,7 @@ Statescope_model.StateDiscovery()
 # History:
 #  13-12-2024: File creation, write code, test Deconvolution and Refinement
 #  14-12-2024: Finish StateDiscovery testing
+#  20-01-2025: Additional checks, Utility and Visualization Functions 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
@@ -37,6 +38,8 @@ import anndata as ad
 from glob import glob
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -341,34 +344,36 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
 # 1.2  Define Statescope plotting functions
 #-------------------------------------------------------------------------------
 
-
 def generate_color_map(state_columns):
     """
-    Generates a consistent color map for cell types and their states with subtle shade variations.
-    
-    :param state_columns: List of state column names (e.g., ['CD4 T_0', 'CD4 T_1', 'Tumor_0']).
+    Generates a consistent color map for cell types and their states with distinct colors
+    and subtle shade variations for states.
+
+    :param state_columns: List of state column names (e.g., ['T_cells_CD8+_0', 'T_cells_CD4+_1', 'NK_cells_0']).
     :returns: A dictionary mapping column names to colors.
     """
-    # Extract unique cell types
-    unique_cell_types = sorted(set([col.split('_')[0] for col in state_columns]))
+    # Extract unique cell types using the full prefix before the last underscore
+    unique_cell_types = sorted(set(['_'.join(col.split('_')[:-1]) for col in state_columns]))
     color_map = {}
-    
-    # Generate a base color palette for unique cell types
-    base_palette = sns.color_palette("tab20", len(unique_cell_types))  # Up to 20 cell types
+
+    # Generate a large base color palette for unique cell types
+    base_palette = sns.color_palette("husl", len(unique_cell_types))  # Distinct colors
     cell_type_colors = {cell_type: base_palette[idx] for idx, cell_type in enumerate(unique_cell_types)}
 
     for cell_type in unique_cell_types:
-        # Generate very similar shades for each cell type
+        # Get the base color for the cell type
         base_color = cell_type_colors[cell_type]
-        shades = sns.light_palette(base_color, n_colors=10, reverse=False, input="rgb")
-        
-        # Assign a subtle shade to each state within the cell type
-        states = [col for col in state_columns if col.startswith(cell_type)]
+
+        # Generate distinct shades for states within the cell type
+        states = [col for col in state_columns if '_'.join(col.split('_')[:-1]) == cell_type]
+        shades = sns.light_palette(base_color, n_colors=len(states), reverse=False, input="rgb")
+
+        # Assign each state a shade
         for i, state in enumerate(states):
-            step = i / max(len(states) - 1, 1)  # Ensure at least one shade
-            color_map[state] = sns.blend_palette([base_color, (1, 1, 1)], n_colors=10, as_cmap=False)[int(step * 9)]
+            color_map[state] = shades[i]
 
     return color_map
+
 
 def Heatmap_Fractions(Statescope_model):
     """
@@ -385,7 +390,7 @@ def Heatmap_Fractions(Statescope_model):
     fractions = Statescope_model.Fractions
 
     # Generate a clustermap
-    g = sns.clustermap(fractions, annot=True, fmt=".2f", cmap="viridis",
+    g = sns.clustermap(fractions, annot=True, fmt=".2f", cmap="coolwarm",
                        figsize=(12, 8), cbar_kws={'label': 'Fraction'},
                        method='average')  # method can be 'single', 'complete', 'average', etc.
 
@@ -400,10 +405,10 @@ def Heatmap_Fractions(Statescope_model):
     # Show the plot
     plt.show()
 
-
 def Heatmap_GEX(Statescope_model, celltype):
     """
-    Plots a clustered heatmap of the purified gene expression matrix for a specific cell type.
+    Plots a clustered heatmap of the purified gene expression matrix for a specific cell type,
+    with no gene labels on the x-axis and an x-axis title.
 
     :param Statescope_model: The Statescope object containing refined gene expression data.
     :param str celltype: The cell type for which the heatmap is to be plotted.
@@ -414,35 +419,93 @@ def Heatmap_GEX(Statescope_model, celltype):
     # Extract the GEX matrix
     gex_matrix = Extract_GEX(Statescope_model, celltype)
 
+    # Replace gene names (column names) with numerical indexes for the x-axis
+    gex_matrix.columns = range(len(gex_matrix.columns))
+
     # Plot the heatmap
     plt.figure(figsize=(12, 8))
-    sns.clustermap(
+    heatmap = sns.clustermap(
         gex_matrix,
-        cmap="viridis",
+        cmap="coolwarm",
         annot=False,
         figsize=(12, 10),
-        xticklabels=gex_matrix.columns,
-        yticklabels=gex_matrix.index,
-        cbar_kws={'label': 'Expression Level'},
-        dendrogram_ratio=(0.2, 0.2)
+        xticklabels=False,  # Completely remove x-axis tick labels
+        yticklabels=gex_matrix.index,   # Retain original y-axis labels
+        cbar_kws={'label': 'Expression Level'}
     )
 
-    # Reduce the size of the gene labels
-    plt.gcf().axes[2].tick_params(axis='x', rotation=90, labelsize=8)
-    plt.gcf().axes[2].tick_params(axis='y', labelsize=8)
+    # Add x-axis title to the heatmap
+    heatmap.ax_heatmap.set_xlabel("Genes", fontsize=12, labelpad=20)
 
     plt.title(f"Clustered Heatmap of Gene Expression for Cell Type: {celltype}", pad=20)
     plt.tight_layout()
     plt.show()
 
 
+def Heatmap_StateScores(Statescope_model):
+    """
+    Visualize the state scores matrix as a heatmap with states aligned with their respective cell types.
+    """
+    # Extract the state scores
+    state_scores = Extract_StateScores(Statescope_model)
+
+    # Generate color map for columns
+    color_map = generate_color_map(state_scores.columns)
+
+    # Separate cell types and states for labels
+    cell_states = state_scores.columns
+    cell_types = ['_'.join(col.split('_')[:-1]) for col in cell_states]  # Full cell type names
+    state_numbers = [col.split('_')[-1] for col in cell_states]
+
+    # Create a heatmap
+    plt.figure(figsize=(16, 12))
+    sns.heatmap(
+        state_scores,
+        cmap="coolwarm",
+        cbar_kws={"label": "State Scores"},
+        xticklabels=False,  # Turn off default x-tick labels
+        yticklabels=True,
+        linewidths=0.5
+    )
+
+    # Access the axes
+    ax = plt.gca()
+
+    # Add state numbers directly on top of color blocks
+    for x, state in enumerate(state_numbers):
+        color = color_map[state_scores.columns[x]]  # Get the color for the current state
+        ax.text(
+            x + 0.5, len(state_scores) + 0.5,  # Position above the heatmap
+            state, fontsize=8, ha='center', va='center', color='black',
+            bbox=dict(facecolor=color, edgecolor='none', boxstyle='round,pad=0.3', alpha=0.8)
+        )
+
+    # Group cell types and display each name once
+    xticks = []
+    xticklabels = []
+    prev_cell_type = None
+    for idx, (col, cell_type) in enumerate(zip(cell_states, cell_types)):
+        if cell_type != prev_cell_type:
+            xticks.append(idx + 0.5)
+            xticklabels.append(cell_type)
+            prev_cell_type = cell_type
+
+    # Set x-axis ticks and labels
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticklabels, fontsize=10, rotation=90, ha='center')
+    ax.tick_params(axis='x', pad=25)  # Adjust the padding to push tick labels further down
+
+    # Remove the x-axis title
+    ax.set_xlabel("")
+
+    # Set the title
+    ax.set_title("State Scores Heatmap", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
 def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     """
-    Visualize the state loadings matrix with color-coded columns, 
-    grouping cell types and displaying their states more compactly.
-
-    :param Statescope_model: The Statescope object containing StateLoadings.
-    :param int top_genes: Number of top genes to display (default is all genes).
+    Visualize the state loadings matrix as a heatmap with states aligned with their respective cell types.
     """
     # Extract the state loadings
     state_loadings = Extract_StateLoadings(Statescope_model)
@@ -455,156 +518,292 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     # Generate color map for columns
     color_map = generate_color_map(state_loadings.columns)
 
-    # Separate cell types and states for compact x-axis labels
+    # Separate cell types and states for labels
     cell_states = state_loadings.columns
-    cell_types = [col.split('_')[0] for col in cell_states]
-    state_numbers = [col.split('_')[1] for col in cell_states]
+    cell_types = ['_'.join(col.split('_')[:-1]) for col in cell_states]  # Full cell type names
+    state_numbers = [col.split('_')[-1] for col in cell_states]
 
-    # Prepare unique cell types and their state ranges for compact labeling
-    unique_cell_types = []
-    state_ranges = []
-    prev_cell_type = None
-    for ctype, state in zip(cell_types, state_numbers):
-        if ctype != prev_cell_type:
-            unique_cell_types.append(ctype)
-            state_ranges.append([state])
-            prev_cell_type = ctype
-        else:
-            state_ranges[-1].append(state)
-
-    # Format the state labels
-    compact_labels = []
-    for ctype, states in zip(unique_cell_types, state_ranges):
-        state_str = " ".join(states)
-        compact_labels.append((ctype, state_str))
-
-    # Create a DataFrame for `col_colors` matching the order of `state_loadings.columns`
-    col_colors = pd.DataFrame(
-        {"color": [color_map[col] for col in cell_states]},
-        index=cell_states
-    )
-
-    # Create clustered heatmap
-    g = sns.clustermap(
+    # Create a heatmap
+    plt.figure(figsize=(16, 12))
+    sns.heatmap(
         state_loadings,
-        cmap="viridis",
+        cmap="coolwarm",
         cbar_kws={"label": "State Loadings"},
-        col_colors=col_colors["color"].values,
         xticklabels=False,  # Turn off default x-tick labels
         yticklabels=True,
-        linewidths=0.5,
-        figsize=(14, 10)
+        linewidths=0.5
     )
 
-    # Add custom x-axis labels for cell types and states
-    ax = g.ax_heatmap
+    # Access the axes
+    ax = plt.gca()
 
-    # Set x-ticks at midpoints of each cell type group
+    # Add state numbers directly on top of color blocks
+    for x, state in enumerate(state_numbers):
+        color = color_map[state_loadings.columns[x]]  # Get the color for the current state
+        ax.text(
+            x + 0.5, len(state_loadings) + 0.2,  # Position closer to the heatmap
+            state, fontsize=8, ha='center', va='bottom', color='black',
+            bbox=dict(facecolor=color, edgecolor='none', boxstyle='round,pad=0.2', alpha=0.8)
+        )
+
+    # Group cell types and display each name once
     xticks = []
-    xlabels = []
-    for i, (ctype, states) in enumerate(compact_labels):
-        state_indices = [
-            idx for idx, col in enumerate(cell_types) if col == ctype
-        ]
-        midpoint = sum(state_indices) / len(state_indices)
-        xticks.append(midpoint)
-        xlabels.append(ctype)
-
-    # Set x-axis labels
-    ax.set_xticks(xticks)
-    ax.set_xticklabels(xlabels, fontsize=10, rotation=0)
-
-    # Add state numbers below
-    for x, (ctype, states) in zip(xticks, compact_labels):
-        ax.text(x, -1.5, states, ha="center", va="top", fontsize=8, color="black")
-
-    ax.set_xlabel("Cell Types and States")
-    ax.set_ylabel("Genes")
-
-    plt.title("State Loadings Heatmap", fontsize=12)
-    plt.show()
-
-def Heatmap_StateScores(Statescope_model):
-    """
-    Visualize the state scores matrix with color-coded columns, 
-    grouping cell types and displaying their states more compactly.
-
-    :param Statescope_model: The Statescope object containing StateScores.
-    """
-    # Extract the state scores
-    state_scores = Extract_StateScores(Statescope_model)
-
-    # Generate color map for columns
-    color_map = generate_color_map(state_scores.columns)
-
-    # Separate cell types and states for compact x-axis labels
-    cell_states = state_scores.columns
-    cell_types = [col.split('_')[0] for col in cell_states]
-    state_numbers = [col.split('_')[1] for col in cell_states]
-
-    # Prepare unique cell types and their state ranges for compact labeling
-    unique_cell_types = []
-    state_ranges = []
+    xticklabels = []
     prev_cell_type = None
-    for ctype, state in zip(cell_types, state_numbers):
-        if ctype != prev_cell_type:
-            unique_cell_types.append(ctype)
-            state_ranges.append([state])
-            prev_cell_type = ctype
-        else:
-            state_ranges[-1].append(state)
+    for idx, (col, cell_type) in enumerate(zip(cell_states, cell_types)):
+        if cell_type != prev_cell_type:
+            xticks.append(idx + 0.5)
+            xticklabels.append(cell_type)
+            prev_cell_type = cell_type
 
-    # Format the state labels
-    compact_labels = []
-    for ctype, states in zip(unique_cell_types, state_ranges):
-        state_str = " ".join(states)
-        compact_labels.append((ctype, state_str))
-
-    # Create a DataFrame for `col_colors` matching the order of `state_scores.columns`
-    col_colors = pd.DataFrame(
-        {"color": [color_map[col] for col in cell_states]},
-        index=cell_states
-    )
-
-    # Create clustered heatmap
-    g = sns.clustermap(
-        state_scores,
-        cmap="viridis",
-        cbar_kws={"label": "State Scores"},
-        col_colors=col_colors["color"].values,
-        xticklabels=False,  # Turn off default x-tick labels
-        yticklabels=True,
-        linewidths=0.5,
-        figsize=(14, 10)
-    )
-
-    # Add custom x-axis labels for cell types and states
-    ax = g.ax_heatmap
-
-    # Set x-ticks at midpoints of each cell type group
-    xticks = []
-    xlabels = []
-    for i, (ctype, states) in enumerate(compact_labels):
-        state_indices = [
-            idx for idx, col in enumerate(cell_types) if col == ctype
-        ]
-        midpoint = sum(state_indices) / len(state_indices)
-        xticks.append(midpoint)
-        xlabels.append(ctype)
-
-    # Set x-axis labels
+    # Set x-axis ticks and labels
     ax.set_xticks(xticks)
-    ax.set_xticklabels(xlabels, fontsize=10, rotation=0)
+    ax.set_xticklabels(xticklabels, fontsize=10, rotation=90, ha='center')
+    ax.tick_params(axis='x', pad=15)  # Adjust the padding to push tick labels further down
 
-    # Add state numbers below
-    for x, (ctype, states) in zip(xticks, compact_labels):
-        ax.text(x, -1.5, states, ha="center", va="top", fontsize=8, color="black")
+    # Adjust layout to ensure proper spacing
+    plt.tight_layout(rect=[0, 0, 1, 1])  # Adjust the figure bounding box
 
-    ax.set_xlabel("Cell Types and States")
-    ax.set_ylabel("Samples")
-
-    plt.title("State Scores Heatmap", fontsize=12)
+    # Set the title
+    ax.set_title("State Loadings Heatmap", fontsize=14)
     plt.show()
+
+
+def BarPlot_StateLoadings(Statescope_model, top_genes=1):
+    """
+    Create a bar plot for cell types and their states, showing coefficients with top genes labeled.
+
+    :param Statescope_model: The Statescope object containing StateLoadings.
+    :param top_genes: Number of top genes to label per state.
+    """
+    # Extract State Loadings
+    state_loadings = Extract_StateLoadings(Statescope_model)
+
+    # Generate color map for states
+    color_map = generate_color_map(state_loadings.columns)
+
+    # Prepare data for plotting
+    bar_data = []
+    for state in state_loadings.columns:
+        cell_type = '_'.join(state.split('_')[:-1])
+        state_number = int(state.split('_')[-1])  # Convert state number to integer
+        # Get top genes for the state
+        top_gene_values = state_loadings[state].abs().nlargest(top_genes)
+        for gene, coeff in top_gene_values.items():
+            bar_data.append((cell_type, state, state_number, coeff, gene))
+
+    # Create a DataFrame for easy sorting and plotting
+    bar_df = pd.DataFrame(bar_data, columns=["Cell Type", "State", "State Number", "Coefficient", "Top Gene"])
+    bar_df.sort_values(by=["Cell Type", "State Number", "Coefficient"], ascending=[True, True, False], inplace=True)
+
+    # Prepare y-axis labels with cell type names on the first state only
+    y_tick_labels = []
+    prev_cell_type = None
+    for idx, row in bar_df.iterrows():
+        if row["Cell Type"] != prev_cell_type:
+            y_tick_labels.append(f"{row['Cell Type']} {row['State Number']}")  # Show cell type + state number
+            prev_cell_type = row["Cell Type"]
+        else:
+            y_tick_labels.append(f"{row['State Number']}")  # Show state number only
+
+    # Calculate dynamic font size for state numbers
+    font_size = max(10 - top_genes, 5)  # Dynamically reduce font size but keep it readable
+
+    # Plot horizontal bar plot
+    plt.figure(figsize=(14, 10))
+    bars = plt.barh(
+        range(len(bar_df)), bar_df["Coefficient"], 
+        color=[color_map[row["State"]] for _, row in bar_df.iterrows()],
+        edgecolor='black', alpha=0.8
+    )
+
+    # Add gene labels to the right of bars
+    for bar, label in zip(bars, bar_df["Top Gene"]):
+        plt.text(
+            bar.get_width() + 0.01,  # Position slightly beyond the bar
+            bar.get_y() + bar.get_height() / 2,
+            label,
+            ha='left', va='center', fontsize=9, color='black'
+        )
+
+    # Add labels and title
+    plt.xlabel("Coefficient (Max Loading)", fontsize=12)
+    plt.ylabel("States (Grouped by Cell Type)", fontsize=12)
+    plt.title(f"State Loadings with Top {top_genes} Genes", fontsize=14)
+
+    # Customize y-axis ticks and labels with dynamic font size
+    plt.yticks(ticks=range(len(bar_df)), labels=y_tick_labels, fontsize=font_size)
+    
+    # Invert y-axis to display states from top to bottom
+    plt.gca().invert_yaxis()
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def TSNE_AllStates(Statescope_model, weighing='Omega', perplexity=5, n_iter=1000, point_size=80):
+    """
+    Create a t-SNE plot for visualizing all cell types and states using scaled data.
+
+    :param Statescope_model: The Statescope object containing Fractions, GEX, Omega, and StateScores.
+    :param weighing: The weighing method for scaling ('Omega', 'OmegaFractions', 'centering', or 'no_weighing').
+    :param perplexity: t-SNE perplexity parameter.
+    :param n_iter: Number of iterations for optimization.
+    :param point_size: Size of the points in the scatter plot.
+    """
+    # Extract necessary data
+    Fractions = Statescope_model.Fractions  # Cell type fractions
+    GEX_all = Statescope_model.GEX          # Purified gene expression
+    Omega_all = Statescope_model.Omega      # State loadings
+    StateScores = Statescope_model.StateScores  # State scores
+
+    # Prepare data for t-SNE
+    all_scaled_data = []
+    all_labels = []
+    all_states = []
+
+    for celltype, Omega in Omega_all.items():
+        if celltype not in GEX_all:
+            print(f"Warning: Gene expression data for {celltype} not found. Skipping.")
+            continue
+
+        GEX = GEX_all[celltype]
+
+        # Create scaled data for this cell type
+        scaled_data = Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing)
+        all_scaled_data.append(scaled_data)
+
+        # Label each row with the cell type
+        all_labels.extend([celltype] * scaled_data.shape[0])
+
+        # Extract dominant state numbers
+        scores = StateScores[[col for col in StateScores.columns if col.startswith(celltype)]]
+        dominant_states = scores.idxmax(axis=1).str.split('_').str[-1].astype(int)  # Extract state numbers
+        all_states.extend(dominant_states)
+
+    # Combine all scaled data
+    combined_data = np.vstack(all_scaled_data)
+
+    # Normalize the data
+    scaler = StandardScaler()
+    normalized_data = scaler.fit_transform(combined_data)
+
+    # Perform t-SNE
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=n_iter)
+    tsne_results = tsne.fit_transform(normalized_data)
+
+    # Create a DataFrame for t-SNE results
+    tsne_df = pd.DataFrame(tsne_results, columns=['t-SNE1', 't-SNE2'])
+    tsne_df['Cell Type'] = all_labels
+    tsne_df['State Number'] = all_states
+
+    # Generate a color map for cell types
+    unique_cell_types = tsne_df['Cell Type'].unique()
+    color_map = {cell_type: color for cell_type, color in zip(unique_cell_types, sns.color_palette("husl", len(unique_cell_types)))}
+
+    # Plot t-SNE
+    plt.figure(figsize=(14, 10))
+    for cell_type in unique_cell_types:
+        cell_type_df = tsne_df[tsne_df['Cell Type'] == cell_type]
+        plt.scatter(
+            cell_type_df['t-SNE1'],
+            cell_type_df['t-SNE2'],
+            label=cell_type,
+            c=[color_map[cell_type]] * len(cell_type_df),
+            s=point_size,  # Adjust point size
+            alpha=0.7,
+            edgecolor='k'
+        )
+
+    # Add state numbers as labels on the points
+    for i in range(len(tsne_df)):
+        plt.text(tsne_df['t-SNE1'][i], tsne_df['t-SNE2'][i], tsne_df['State Number'][i],
+                 fontsize=6, alpha=0.8, ha='center')
+
+    # Add plot details
+    plt.legend(title='Cell Types', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.title("t-SNE of All Cell Types and States", fontsize=16)
+    plt.xlabel("t-SNE1")
+    plt.ylabel("t-SNE2")
+    plt.tight_layout()
+    plt.show()
+
+def TSNE_CellTypes(Statescope_model, celltype=None, weighing='Omega', perplexity=5, n_iter=1000, point_size=150):
+    """
+    Create t-SNE plots for a single cell type or for all cell types, displayed individually.
+
+    :param Statescope_model: The Statescope object containing Fractions, GEX, Omega, and StateScores.
+    :param celltype: The specific cell type to visualize (default: None, meaning all cell types).
+    :param weighing: The weighing method for scaling ('Omega', 'OmegaFractions', 'centering', or 'no_weighing').
+    :param perplexity: t-SNE perplexity parameter.
+    :param n_iter: Number of iterations for optimization.
+    :param point_size: Size of the points in the scatter plot.
+    """
+    Omega_all = Statescope_model.Omega
+    GEX_all = Statescope_model.GEX
+    StateScores = Statescope_model.StateScores
+    Fractions = Statescope_model.Fractions
+
+    # Generate consistent colors for all cell types
+    unique_cell_types = Omega_all.keys()
+    color_map = {cell_type: color for cell_type, color in zip(unique_cell_types, sns.color_palette("husl", len(unique_cell_types)))}
+
+    # Determine which cell types to process
+    celltypes_to_plot = [celltype] if celltype else list(Omega_all.keys())
+
+    # Loop through each cell type and generate t-SNE
+    for celltype in celltypes_to_plot:
+        if celltype not in GEX_all or celltype not in Omega_all:
+            print(f"Data for cell type {celltype} not found. Skipping.")
+            continue
+
+        GEX = GEX_all[celltype]
+        Omega = Omega_all[celltype]
+
+        # Create scaled data for this cell type
+        scaled_data = Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing)
+
+        # Extract dominant state numbers
+        scores = StateScores[[col for col in StateScores.columns if col.startswith(celltype)]]
+        dominant_states = scores.idxmax(axis=1).str.split('_').str[-1].astype(int)
+
+        # Normalize the data
+        scaler = StandardScaler()
+        normalized_data = scaler.fit_transform(scaled_data)
+
+        # Perform t-SNE
+        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=n_iter)
+        tsne_results = tsne.fit_transform(normalized_data)
+
+        # Create a DataFrame for t-SNE results
+        tsne_df = pd.DataFrame(tsne_results, columns=['t-SNE1', 't-SNE2'])
+        tsne_df['State Number'] = dominant_states.reset_index(drop=True)
+
+        # Plot t-SNE
+        plt.figure(figsize=(10, 8))
+        plt.scatter(
+            tsne_df['t-SNE1'],
+            tsne_df['t-SNE2'],
+            label=celltype,
+            c=[color_map[celltype]] * len(tsne_df),
+            s=point_size,
+            alpha=0.7,
+            edgecolor='k'
+        )
+
+        # Add state numbers as labels on the points
+        for i in range(len(tsne_df)):
+            plt.text(tsne_df['t-SNE1'][i], tsne_df['t-SNE2'][i], str(tsne_df['State Number'][i]),
+                     fontsize=6, alpha=0.8, ha='center')
+
+        # Add plot details
+        plt.legend(title='Cell Type', loc='upper left')
+        plt.title(f"t-SNE for {celltype} and States", fontsize=16)
+        plt.xlabel("t-SNE1")
+        plt.ylabel("t-SNE2")
+        plt.tight_layout()
+        plt.show()
+
 
 
 #-------------------------------------------------------------------------------
@@ -687,3 +886,20 @@ def Extract_StateLoadings(Statescope_model):
     print(f"StateLoadings matrix extracted successfully. Shape: {state_loadings.shape}")
     return state_loadings
 
+def Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing='Omega'):
+    """
+    Create a scaled matrix for clustering.
+    """
+    if weighing == 'Omega':
+        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose()).to_numpy()
+    elif weighing == 'OmegaFractions':
+        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose())
+        Cluster_matrix = Cluster_matrix.mul(Fractions[celltype], axis=0).to_numpy()
+    elif weighing == 'centering':
+        Cluster_matrix = (GEX - np.mean(GEX, axis=0)).to_numpy()
+    elif weighing == 'no_weighing':
+        Cluster_matrix = GEX.to_numpy()
+    else:
+        raise ValueError("Invalid weighing method.")
+
+    return Cluster_matrix
