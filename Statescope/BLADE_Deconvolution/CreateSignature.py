@@ -4,7 +4,7 @@
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #
 # Functions for Signature creation
-# Author: Jurriaan Janssen (j.janssen4@amsterdamumc.nl)
+# Author: Jurriaan Janssen (j.janssen4@amsterdamumc.nl) , Aryamaan Bose (a.bose1@amsterdamumc.nl)
 #
 # Usage:"""
 #
@@ -96,21 +96,20 @@ def Check_adata_validity(adata, celltype_key='celltype'):
         has_negative_values = np.any(adata.X < 0)
     
     if has_negative_values:
-        raise AssertionError("The data matrix (adata.X) contains negative values, which are not allowed.")
+        raise AssertionError("The data matrix (adata.X) contains negative values, which are not allowed. adata.X has to be in log, library-size corrected format.")
 
     print("No negative values found in the data matrix (adata.X).")
 
     ###CHECK AGAIN NEEDS FIXING 
-    ##max value set to 100 ##maybe redifne logic
-    # Check if the data is log-transformed using min and max values
-    data_min = adata.X.min() if not is_sparse else adata.X.data.min()
-    data_max = adata.X.max() if not is_sparse else adata.X.data.max()
+    # Check if normalization and log transformation were performed
+    if 'log1p' not in adata.uns:
+        raise AssertionError(
+            "The data does not appear to be log-transformed. "
+            "Please use Scanpy's `sc.pp.normalize_total(adata, target_sum=1e4)` and `sc.pp.log1p(adata)`."
+        )
+
+    print("Validation passed: Data appears to be log-transformed.")
     
-    if data_min < 0 or data_max > 100:  # Assuming 1e6 as the upper range for raw counts
-        raise AssertionError("The data does not appear to be log-transformed. Please log-transform the data.")
-
-    print("Log-transformation check passed: Data appears to be log-transformed.")
-
     # Check if the data is scaled to 1e4
     total_counts = adata.X.sum(axis=1).A1 if is_sparse else adata.X.sum(axis=1)
     
@@ -118,12 +117,13 @@ def Check_adata_validity(adata, celltype_key='celltype'):
     max_value = adata.X.max() if not is_sparse else adata.X.data.max()
     print(f"Maximum value in the data matrix (adata.X): {max_value}")
     if max_value > 100:
-        print("Warning: Extremely large values detected in the data matrix (adata.X). This might influence performance.")
+        print("Warning: Extremely large values detected in the data matrix (adata.X).  This might influence performance. adata.X has to be in log, library-size corrected format.")
 
     # Check the number of cells and genes
     num_cells, num_genes = adata.shape
     print(f"Number of cells: {num_cells}")
     print(f"Number of genes: {num_genes}")
+
 
     # Calculate total counts and check for outlier cells
     median_total_counts = np.median(total_counts)
@@ -133,11 +133,14 @@ def Check_adata_validity(adata, celltype_key='celltype'):
     outlier_cells = np.sum((total_counts > upper_threshold) | (total_counts < lower_threshold))
     print(f"Number of outlier cells based on total counts: {outlier_cells}")
 
-    # Check for highly expressed genes
     gene_counts = adata.X.sum(axis=0).A1 if is_sparse else adata.X.sum(axis=0)
-    highly_expressed_genes = np.sum(gene_counts > upper_threshold)
+    median_gene_counts = np.median(gene_counts)
+    mad_gene_counts = np.median(np.abs(gene_counts - median_gene_counts))
+    upper_gene_threshold = median_gene_counts + 3 * mad_gene_counts
+    highly_expressed_genes = np.sum(gene_counts > upper_gene_threshold)
     print(f"Number of genes with extremely high expression: {highly_expressed_genes}")
 
+    
     # Check for specified cell types if provided in adata.obs
     if celltype_key in adata.obs:
         unique_cell_types = adata.obs[celltype_key].unique()
@@ -243,7 +246,7 @@ def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_high
         scVar.columns = [col.replace("scExp", "scVar") for col in scVar.columns]
         print("Variance correction completed.")
 
-    print("Running AutoGeneS to select highly variable genes.")
+    print("Running AutoGeneS to select marker genes.")
     # Run AutoGeneS and define markers
     AutoGeneS = Run_AutoGeneS(adata, celltype_key, n_highly_variable)
     IsMarker = pd.DataFrame(
@@ -277,7 +280,7 @@ def Run_AutoGeneS(adata, celltype_key, n_highly_variable=3000):
     else:
         data_array = adata.X.toarray()
     
-    print("Subsetting to top highly variable genes...")
+    print(f"Subsetting to top {n_highly_variable} highly variable genes...")
     # Subset adata to top n hvgs
     hvgs = pd.DataFrame(data_array.transpose(), index=adata.var_names).apply(np.var, axis=1).sort_values().nlargest(n_highly_variable).index
     adata = adata[:, hvgs]
