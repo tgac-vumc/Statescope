@@ -16,5 +16,8 @@ dependencies:
   - anndata>=0.7
   - pytorch
   - torchvision
+  - torchaudio
+  - pytorch-cuda
   - cudatoolkit
   - seaborn
+  - requests
