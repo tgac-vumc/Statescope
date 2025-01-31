@@ -40,6 +40,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
+import requests
+from io import StringIO
+import os  
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -86,9 +89,13 @@ class Statescope:
         # Prepare Signature with markers only
         scExp_marker = self.scExp.loc[self.Markers,:].to_numpy()
         scVar_marker = self.scVar.loc[self.Markers, :].to_numpy()
-
+        
         # Prepare Bulk (select/match genes)
         Y = self.Bulk.loc[self.Markers,self.Samples].to_numpy()
+
+        # Check validity of Expectation (prior fractions)
+        Check_Expectation_validity(Expectation)
+        
         # Excecute BLADE Deconvolution: FrameWork iterative
         final_obj, best_obj, best_set, outs = Framework_Iterative(scExp_marker, scVar_marker, Y, Ind_Marker,
                         Alpha, Alpha0, Kappa0, sY,
@@ -122,9 +129,9 @@ class Statescope:
         # Prepare Signature
         scExp_All = self.scExp.loc[self.Genes, :].to_numpy()
         scVar_All = self.scVar.loc[self.Genes, :].to_numpy()
-        # Prepare Bulk (select/match genes
+        # Prepare Bulk (select/match genes)
         Y = self.Bulk.loc[self.Genes,self.Samples].to_numpy()
-        # Perform gene expression revinement with all genes in signature
+        # Perform gene expression refinement with all genes in signature
         obj = Purify_AllGenes(self.BLADE, scExp_All, scVar_All,Y,self.Ncores, weight)
         # create output GEX dictionary
         GEX = {ct:pd.DataFrame(obj.Nu[:,:,i],index=self.Samples,columns=self.Genes) for i,ct in enumerate(self.Celltypes)}
@@ -170,22 +177,193 @@ class Statescope:
             raise ValueError("Mismatch in the lengths of 'celltype' and 'K'.")
 
         State_dict = {}
+        CopheneticCoefficients = {}
         StateScores = pd.DataFrame()
         StateLoadings = pd.DataFrame()
 
         for ct, k in zip(celltype, K):
-            State_dict[ct] = StateDiscovery_FrameWork(self.GEX[ct], self.Omega[ct], self.Fractions, ct, weighing, k, n_iter, n_final_iter, min_cophenetic, max_clusters, self.Ncores)
+            cNMF_model, cophcors =  StateDiscovery_FrameWork(self.GEX[ct], self.Omega[ct], self.Fractions, ct, weighing, k, n_iter, n_final_iter, min_cophenetic, max_clusters, self.Ncores)
+            CopheneticCoefficients[ct] = cophcors
+            State_dict[ct] = cNMF_model
             StateScores = pd.concat([StateScores, pd.DataFrame(State_dict[ct].H.transpose(), index=self.Samples).add_prefix(ct+'_')], axis=1)
             StateLoadings = pd.concat([StateLoadings, pd.DataFrame(State_dict[ct].W, index=self.Genes).add_prefix(ct+'_')], axis=1)
 
         self.cNMF = State_dict
+        self.CopheneticCoefficients = CopheneticCoefficients
         self.StateScores = StateScores
         self.StateLoadings = StateLoadings
         self.isStateDiscoveryDone = True
         print("StateDiscovery completed successfully.")
-    #-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
 #-------------------------------------------------------------------------------
+def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10):
+    """ 
+    Initializes Statescope object with Bulk and (pre-defined) Signature.
+
+    :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected counts are expected.
+    :param pandas.DataFrame or ad.AnnData or None Signature: Cell type specific gene expression matrix.
+    :param str TumorType: Tumor type to select predefined signature.
+    :param str Ncelltypes: Number of cell types in the signature.
+    :param list MarkerList: Predefined list of markers to use for deconvolution.
+    :param str celltype_key: Key to use for cell type in AnnData.
+    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection.
+    :param int Ncores: Number of cores to use for parallel computing.
+
+    :returns: Statescope object initialized with the given parameters.
+    """
+    available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
+
+    if Signature:
+        if isinstance(Signature, pd.DataFrame):
+            Check_Signature_validity(Signature)
+        elif isinstance(Signature, ad.AnnData):
+            Signature = CreateSignature(Signature, celltype_key=celltype_key)
+    else:
+        if TumorType == '' or TumorType not in available_signatures:
+            error_msg = "TumorType not specified or invalid. Available options include:\n"
+            for t, cells in available_signatures.items():
+                error_msg += f"{t}: {', '.join(cells)} cell types\n"
+            raise ValueError(error_msg)
+        
+        if Ncelltypes == '':
+            # Select the signature with the smallest number of cell types if Ncelltypes is not specified
+            Ncelltypes = min(available_signatures[TumorType], key=int)
+        
+        Signature = fetch_signature(TumorType, Ncelltypes)
+        if Signature is None:
+            error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
+            error_msg += ', '.join(available_signatures[TumorType])
+            raise ValueError(error_msg)
+    
+    # Continue with the initialization as before
+    Samples = Bulk.columns.tolist()
+    Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
+    Genes = [gene for gene in Bulk.index if gene in Signature.index]
+
+    Signature = Signature.loc[Genes, :]
+    Bulk = Bulk.loc[Genes, :]
+    Bulk = Check_Bulk_Format(Bulk)
+    Markers = Signature[Signature.IsMarker].index.tolist()
+    if MarkerList:
+        Markers = [gene for gene in Genes if gene in MarkerList]
+
+    Omega_columns = ['scVar_' + ct for ct in Celltypes]
+    Mu_columns = ['scExp_' + ct for ct in Celltypes]
+
+    # Print the number of common markers
+    common_markers = set(Markers).intersection(Bulk.index)
+    print(f"Number of common markers between Bulk and Signature: {len(common_markers)}")
+
+    # Print the number of genes common between Bulk and Signature
+    common_genes = set(Genes).intersection(Signature.index)
+    print(f"Number of genes common between Bulk and Signature: {len(common_genes)}")
+
+
+    Statescope_object = Statescope(Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores)
+    return Statescope_object
+
+
+#-------------------------------------------------------------------------------
+# 1.2  Miscellaneous functions
+#-------------------------------------------------------------------------------
+# Extract Gene expression matrix
+def Extract_GEX(Statescope_model, celltype):
+    """
+    Extracts the purified gene expression matrix (GEX) for a specified cell type from a Statescope model.
+
+    :param Statescope_model: The Statescope object containing refined gene expression data.
+    :param str celltype: The cell type for which the GEX is to be extracted.
+
+    :returns: pandas.DataFrame containing the purified gene expression matrix for the specified cell type,
+              with sample names as rows and gene names as columns.
+    :raises KeyError: If the specified cell type is not found in the Statescope model's GEX dictionary.
+    :raises AttributeError: If the Statescope model does not have a GEX attribute or refinement is incomplete.
+    """
+    if not hasattr(Statescope_model, 'GEX'):
+        raise AttributeError("The Statescope model does not contain gene expression data. Ensure refinement has been completed.")
+    
+    if not Statescope_model.isRefinementDone:
+        raise Exception("Refinement must be completed before extracting gene expression data.")
+
+    if celltype in Statescope_model.GEX:
+        # Extract the GEX DataFrame for the specified cell type
+        gex_matrix = Statescope_model.GEX[celltype]
+
+        # Ensure the DataFrame retains the sample and gene names
+        gex_matrix.index = Statescope_model.Samples
+        gex_matrix.columns = Statescope_model.Genes
+        gex_matrix.index.name = 'Samples'
+        gex_matrix.columns.name = 'Genes'
+        return gex_matrix
+    else:
+        raise KeyError(f"Cell type '{celltype}' not found in the Statescope model. Available cell types: {list(Statescope_model.GEX.keys())}")
+
+def Extract_StateScores(Statescope_model):
+    """
+    Extracts the state scores from a Statescope model after StateDiscovery has been performed.
+
+    :param Statescope_model: The Statescope object containing state discovery results.
+    
+    :returns: pandas.DataFrame containing state scores for all samples and cell types.
+    :raises AttributeError: If StateDiscovery has not been completed or the StateScores attribute is missing.
+    """
+    # Check if StateDiscovery has been completed
+    if not hasattr(Statescope_model, 'StateScores') or Statescope_model.StateScores is None:
+        raise AttributeError("StateScores are not available. Please ensure that StateDiscovery has been completed.")
+
+    # Extract the StateScores DataFrame
+    state_scores = Statescope_model.StateScores
+
+    # Verify the DataFrame is not empty
+    if state_scores.empty:
+        raise ValueError("StateScores DataFrame is empty. Check if StateDiscovery was executed correctly.")
+
+    # Return the state scores
+    return state_scores
+
+def Extract_StateLoadings(Statescope_model):
+    """
+    Extracts the StateLoadings matrix for all cell types from a Statescope model.
+
+    :param Statescope_model: The Statescope object containing StateLoadings.
+    
+    :returns: pandas.DataFrame containing the state loadings with appropriate row (genes) 
+              and column (states) names.
+    :raises AttributeError: If the Statescope model does not have StateLoadings.
+    """
+    if not hasattr(Statescope_model, 'StateLoadings') or Statescope_model.StateLoadings is None:
+        raise AttributeError("The Statescope model does not contain StateLoadings. Please ensure that StateDiscovery has been completed.")
+
+    state_loadings = Statescope_model.StateLoadings
+
+    # Check if the row and column names are retained
+    if state_loadings.empty:
+        raise ValueError("The StateLoadings DataFrame is empty. Ensure StateDiscovery has produced valid results.")
+
+    print(f"StateLoadings matrix extracted successfully. Shape: {state_loadings.shape}")
+    return state_loadings
+
+def Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing='Omega'):
+    """
+    Create a scaled matrix for clustering.
+    """
+    if weighing == 'Omega':
+        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose()).to_numpy()
+    elif weighing == 'OmegaFractions':
+        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose())
+        Cluster_matrix = Cluster_matrix.mul(Fractions[celltype], axis=0).to_numpy()
+    elif weighing == 'centering':
+        Cluster_matrix = (GEX - np.mean(GEX, axis=0)).to_numpy()
+    elif weighing == 'no_weighing':
+        Cluster_matrix = GEX.to_numpy()
+    else:
+        raise ValueError("Invalid weighing method.")
+
+    return Cluster_matrix
+
+
 # Function to check Bulk format
 def Check_Bulk_Format(Bulk):
     # Check that Bulk is a DataFrame and has the expected structure
@@ -195,7 +373,10 @@ def Check_Bulk_Format(Bulk):
         raise ValueError("Bulk DataFrame is empty.")
     if Bulk.ndim != 2:
         raise ValueError("Bulk DataFrame is not two-dimensional.")
-
+    if Bulk.index.duplicated().any():
+        raise ValueError("Bulk DataFrame contains duplicate genes in index.")
+    if Bulk.columns.duplicated().any():
+        raise ValueError("Bulk DataFrame contains duplicate sample names in column index.")
     # Original checks and operations
     if np.mean(Bulk > 10).any():
         print('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.')
@@ -205,19 +386,23 @@ def Check_Bulk_Format(Bulk):
 
     return Bulk
 
-        
-    
 # Function to check if custom Signature is valid
 def Check_Signature_validity(Signature):
     if isinstance(Signature, pd.DataFrame):
         if not 'IsMarker' in Signature.columns:
             raise AssertionError('IsMarker column is missing in Signature')
+
+# Function to check if Expectation (prior knowledge of fractions) is valid
+def Check_Expectation_validity(Expectation):
+    if Expectation == None:
+        print('No prior knowledge of expected cell type fractions is given.')
+    else:
+        if (Expectation == 0).any():
+            raise ValueError('The Expectation contains 0 which is not allowed. Consider giving a very small value (0.01)')
+        if (Expectation == 1).any():
+            raise ValueError('The Expectation contains 1 which is not allowed. Consider giving a very large value (0.99)')
+
         
-
-import requests
-from io import StringIO
-import os  
-
 def fetch_signature(tumor_type, n_celltypes):
     """Fetches the signature file directly from GitHub based on tumor type and number of cell types."""
     file_name = f"{tumor_type}_Signature_{n_celltypes}celltypes.txt"
@@ -271,73 +456,7 @@ def list_available_signatures():
         print("Unexpected data structure received from GitHub API:", data)
     return available_signatures
 
-def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10):
-    """ 
-    Initializes Statescope object with Bulk and (pre-defined) Signature.
 
-    :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected counts are expected.
-    :param pandas.DataFrame or ad.AnnData or None Signature: Cell type specific gene expression matrix.
-    :param str TumorType: Tumor type to select predefined signature.
-    :param str Ncelltypes: Number of cell types in the signature.
-    :param list MarkerList: Predefined list of markers to use for deconvolution.
-    :param str celltype_key: Key to use for cell type in AnnData.
-    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection.
-    :param int Ncores: Number of cores to use for parallel computing.
-
-    :returns: Statescope object initialized with the given parameters.
-    """
-    available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
-
-    if Signature:
-        if isinstance(Signature, pd.DataFrame):
-            Check_Signature_validity(Signature)
-        elif isinstance(Signature, ad.AnnData):
-            Signature = CreateSignature(Signature, celltype_key=celltype_key)
-    else:
-        if TumorType == '' or TumorType not in available_signatures:
-            error_msg = "TumorType not specified or invalid. Available options include:\n"
-            for t, cells in available_signatures.items():
-                error_msg += f"{t}: {', '.join(cells)} cell types\n"
-            raise ValueError(error_msg)
-        
-        if Ncelltypes == '':
-            # Select the signature with the smallest number of cell types if Ncelltypes is not specified
-            Ncelltypes = min(available_signatures[TumorType], key=int)
-        
-        Signature = fetch_signature(TumorType, Ncelltypes)
-        if Signature is None:
-            error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
-            error_msg += ', '.join(available_signatures[TumorType])
-            raise ValueError(error_msg)
-        
-
-
-        # Continue with the initialization as before
-    Samples = Bulk.columns.tolist()
-    Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
-    Genes = [gene for gene in Bulk.index if gene in Signature.index]
-
-    Signature = Signature.loc[Genes, :]
-    Bulk = Bulk.loc[Genes, :]
-    Bulk = Check_Bulk_Format(Bulk)
-    Markers = Signature[Signature.IsMarker].index.tolist()
-    if MarkerList:
-        Markers = [gene for gene in Genes if gene in MarkerList]
-
-    Omega_columns = ['scVar_' + ct for ct in Celltypes]
-    Mu_columns = ['scExp_' + ct for ct in Celltypes]
-
-    # Print the number of common markers
-    common_markers = set(Markers).intersection(Bulk.index)
-    print(f"Number of common markers between Bulk and Signature: {len(common_markers)}")
-
-    # Print the number of genes common between Bulk and Signature
-    common_genes = set(Genes).intersection(Signature.index)
-    print(f"Number of genes common between Bulk and Signature: {len(common_genes)}")
-
-
-    Statescope_object = Statescope(Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores)
-    return Statescope_object
 
 
 #-------------------------------------------------------------------------------
@@ -569,6 +688,42 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     plt.show()
 
 
+def Plot_CopheneticCoefficients(Statescope_model):
+    """
+    Create a line plot for cophenetic coefficients of all cell types for different values of k.
+    The red dot indiciates the chosen model.
+
+    :param Statescope_model: The Statescope object containing CopheneticCoefficients.
+    """
+    if not hasattr(Statescope_model, 'CopheneticCoefficients') or Statescope_model.CopheneticCoefficients is None:
+        raise AttributeError("CopheneticCoefficients are not available. Please ensure that StateDiscovery has been completed.")
+
+    Plot_data = pd.DataFrame(Statescope_model.CopheneticCoefficients)
+    # Fetch k
+    Plot_data['k'] = range(2,Plot_data.shape[0]+2)
+    # Create long format
+    Plot_data = pd.melt(Plot_data, id_vars = 'k',var_name = 'celltype', value_name = 'Cophenetic Coefficient')
+    # Fetch chosen models
+    Chosen_models = {ct: sum(ct in col for col in Statescope_model.StateScores.columns) for ct in Plot_data.celltype.unique()}
+    annotation_list = []
+    for k, ct in zip(Plot_data['k'],Plot_data['celltype']):
+        if Chosen_models[ct] == k:
+            annotation_list.append('Chosen')
+        else:
+            annotation_list.append('Not Chosen')
+    Plot_data['Chosen model'] = annotation_list
+    
+    
+    
+    # Create plot
+    plot = sns.FacetGrid(Plot_data, col="celltype")
+    plot.map(sns.lineplot, "k",'Cophenetic Coefficient', color = 'black')
+    plot.map(sns.scatterplot, "k",'Cophenetic Coefficient', 'Chosen model',palette={'Chosen':"red", 'Not Chosen':"black"})
+    plt.show()
+    
+    
+
+    
 def BarPlot_StateLoadings(Statescope_model, top_genes=1):
     """
     Create a bar plot for cell types and their states, showing coefficients with top genes labeled.
@@ -654,7 +809,7 @@ def TSNE_AllStates(Statescope_model, weighing='Omega', perplexity=5, n_iter=1000
     # Extract necessary data
     Fractions = Statescope_model.Fractions  # Cell type fractions
     GEX_all = Statescope_model.GEX          # Purified gene expression
-    Omega_all = Statescope_model.Omega      # State loadings
+    Omega_all = Statescope_model.Omega      # Gene expression variability
     StateScores = Statescope_model.StateScores  # State scores
 
     # Prepare data for t-SNE
@@ -684,13 +839,9 @@ def TSNE_AllStates(Statescope_model, weighing='Omega', perplexity=5, n_iter=1000
     # Combine all scaled data
     combined_data = np.vstack(all_scaled_data)
 
-    # Normalize the data
-    scaler = StandardScaler()
-    normalized_data = scaler.fit_transform(combined_data)
-
     # Perform t-SNE
     tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=n_iter)
-    tsne_results = tsne.fit_transform(normalized_data)
+    tsne_results = tsne.fit_transform(combined_data)
 
     # Create a DataFrame for t-SNE results
     tsne_df = pd.DataFrame(tsne_results, columns=['t-SNE1', 't-SNE2'])
@@ -767,13 +918,9 @@ def TSNE_CellTypes(Statescope_model, celltype=None, weighing='Omega', perplexity
         scores = StateScores[[col for col in StateScores.columns if col.startswith(celltype)]]
         dominant_states = scores.idxmax(axis=1).str.split('_').str[-1].astype(int)
 
-        # Normalize the data
-        scaler = StandardScaler()
-        normalized_data = scaler.fit_transform(scaled_data)
-
         # Perform t-SNE
         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=n_iter)
-        tsne_results = tsne.fit_transform(normalized_data)
+        tsne_results = tsne.fit_transform(scaled_data)
 
         # Create a DataFrame for t-SNE results
         tsne_df = pd.DataFrame(tsne_results, columns=['t-SNE1', 't-SNE2'])
@@ -806,100 +953,3 @@ def TSNE_CellTypes(Statescope_model, celltype=None, weighing='Omega', perplexity
 
 
 
-#-------------------------------------------------------------------------------
-# 1.3  Miscellaneous functions
-#-------------------------------------------------------------------------------
-# Extract Gene expression matrix
-def Extract_GEX(Statescope_model, celltype):
-    """
-    Extracts the purified gene expression matrix (GEX) for a specified cell type from a Statescope model.
-
-    :param Statescope_model: The Statescope object containing refined gene expression data.
-    :param str celltype: The cell type for which the GEX is to be extracted.
-
-    :returns: pandas.DataFrame containing the purified gene expression matrix for the specified cell type,
-              with sample names as rows and gene names as columns.
-    :raises KeyError: If the specified cell type is not found in the Statescope model's GEX dictionary.
-    :raises AttributeError: If the Statescope model does not have a GEX attribute or refinement is incomplete.
-    """
-    if not hasattr(Statescope_model, 'GEX'):
-        raise AttributeError("The Statescope model does not contain gene expression data. Ensure refinement has been completed.")
-    
-    if not Statescope_model.isRefinementDone:
-        raise Exception("Refinement must be completed before extracting gene expression data.")
-
-    if celltype in Statescope_model.GEX:
-        # Extract the GEX DataFrame for the specified cell type
-        gex_matrix = Statescope_model.GEX[celltype]
-
-        # Ensure the DataFrame retains the sample and gene names
-        gex_matrix.index = Statescope_model.Samples
-        gex_matrix.columns = Statescope_model.Genes
-        gex_matrix.index.name = 'Samples'
-        gex_matrix.columns.name = 'Genes'
-        return gex_matrix
-    else:
-        raise KeyError(f"Cell type '{celltype}' not found in the Statescope model. Available cell types: {list(Statescope_model.GEX.keys())}")
-
-def Extract_StateScores(Statescope_model):
-    """
-    Extracts the state scores from a Statescope model after StateDiscovery has been performed.
-
-    :param Statescope_model: The Statescope object containing state discovery results.
-    
-    :returns: pandas.DataFrame containing state scores for all samples and cell types.
-    :raises AttributeError: If StateDiscovery has not been completed or the StateScores attribute is missing.
-    """
-    # Check if StateDiscovery has been completed
-    if not hasattr(Statescope_model, 'StateScores') or Statescope_model.StateScores is None:
-        raise AttributeError("StateScores are not available. Please ensure that StateDiscovery has been completed.")
-
-    # Extract the StateScores DataFrame
-    state_scores = Statescope_model.StateScores
-
-    # Verify the DataFrame is not empty
-    if state_scores.empty:
-        raise ValueError("StateScores DataFrame is empty. Check if StateDiscovery was executed correctly.")
-
-    # Return the state scores
-    return state_scores
-
-def Extract_StateLoadings(Statescope_model):
-    """
-    Extracts the StateLoadings matrix for all cell types from a Statescope model.
-
-    :param Statescope_model: The Statescope object containing StateLoadings.
-    
-    :returns: pandas.DataFrame containing the state loadings with appropriate row (genes) 
-              and column (states) names.
-    :raises AttributeError: If the Statescope model does not have StateLoadings.
-    """
-    if not hasattr(Statescope_model, 'StateLoadings') or Statescope_model.StateLoadings is None:
-        raise AttributeError("The Statescope model does not contain StateLoadings. Please ensure that StateDiscovery has been completed.")
-
-    state_loadings = Statescope_model.StateLoadings
-
-    # Check if the row and column names are retained
-    if state_loadings.empty:
-        raise ValueError("The StateLoadings DataFrame is empty. Ensure StateDiscovery has produced valid results.")
-
-    print(f"StateLoadings matrix extracted successfully. Shape: {state_loadings.shape}")
-    return state_loadings
-
-def Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing='Omega'):
-    """
-    Create a scaled matrix for clustering.
-    """
-    if weighing == 'Omega':
-        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose()).to_numpy()
-    elif weighing == 'OmegaFractions':
-        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose())
-        Cluster_matrix = Cluster_matrix.mul(Fractions[celltype], axis=0).to_numpy()
-    elif weighing == 'centering':
-        Cluster_matrix = (GEX - np.mean(GEX, axis=0)).to_numpy()
-    elif weighing == 'no_weighing':
-        Cluster_matrix = GEX.to_numpy()
-    else:
-        raise ValueError("Invalid weighing method.")
-
-    return Cluster_matrix
