@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "Statescope"
-version = "0.1.6"
+version = "0.2.0"
 description = "Statescope framework to uncover cell states from bulk RNA-seq and DNA-seq data"
 readme = "README.md"
 authors = [
@@ -44,6 +44,5 @@ dependencies = [
 Homepage = "https://statescope.netlify.app/"
 Repository = "https://github.com/tgac-vumc/Statescope"
 
-[tool.setuptools]
-packages = ["Statescope"]
-
+[tool.setuptools.packages.find]
+where = ["src"]
