@@ -36,7 +36,7 @@ from joblib import Parallel, delayed
 #-------------------------------------------------------------------------------
 # 3.1 Run cNMF analysis
 #------------------------------------------------------------------------------- 
-def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=None,n_iter=10,n_final_iter=100,min_cophenetic=0.9,max_clusters=10,Ncores=10):
+def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=None,n_iter=10,n_final_iter=100,min_cophenetic=0.95,max_clusters=10,Ncores=10):
     data_scaled = Create_Cluster_Matrix(GEX,Omega,Fractions,celltype,weighing)
     # Run Initial cNMF runs
     data_dict = dict()
@@ -49,19 +49,18 @@ def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=N
                 cluster_assignments.append(int(np.where(H[:,i] == max(H[:,i]))[0] + 1))    
             data_dict[k] = {'model':cNMF_model,'cophcor':cophcor, 'consensus': consensus_matrix,'cluster_assignments':cluster_assignments}
 
-            # Determine K
-            cophcors = [d['cophcor'] for d in data_dict.values()]
-            ks = [k for k in data_dict.keys()]
-
-            nclust = find_threshold(cophcors,ks,min_cophenetic)
-            drop = biggest_drop(cophcors)
-            if not nclust:
-                nclust = drop
+        # Determine K
+        cophcors = [d['cophcor'] for d in data_dict.values()]
+        ks = [k for k in data_dict.keys()]
+        nclust = find_threshold(cophcors,ks,min_cophenetic)
+        drop = biggest_drop(cophcors)
+        if not nclust:
+            nclust = drop
     else:
         nclust = K
     # Run Final model
     cNMF_model, cophcor, consensus_matrix = cNMF(data_scaled, nclust, n_final_iter, Ncores)
-    return cNMF_model
+    return cNMF_model, cophcors
 
                 
     
