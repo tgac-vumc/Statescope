@@ -2,8 +2,8 @@
   <img width="424" height="200" src="https://github.com/tgac-vumc/Statescope/blob/master/img/Logo_Statescope.png">
 </p>
 
-# OncoBLADE: Malignant cell fraction-informed deconvolution
-OncoBLADE is a Bayesian deconvolution method designed to estimate cell type-specific gene expression profiles and fractions from bulk RNA profiles of tumor specimens by integrating prior knowledge on cell fractions. You can find the [preprint of OncoBLADE at Research Square](https://www.researchsquare.com/article/rs-4252952/v1).
+# Statescope
+Statescope is a computational framework designed to discover cell states from cell type-specific gene expression profiles inferred from bulk RNA profiles.
 
 <p align="center">
   <img width="75%" height="75%" src="https://github.com/tgac-vumc/Statescope/blob/master/img/Statescope_Overview.png">
@@ -14,67 +14,35 @@ OncoBLADE is a Bayesian deconvolution method designed to estimate cell type-spec
 
 ### Using pip
 
-The python package of BLADE is available on pip.
-You can simply (takes only <1min):
+The python package of Statescope is available on pip:
 
 ```
-pip install OncoBLADE
+pip install Statescope
 ```
 
-We tested BLADE with `python => 3.6`.
+We tested Statescope with `python => 3.6`.
 
+###  Running a demo script
 
-### Using Conda
-
-One can create a conda environment contains BLADE and also other dependencies to run [Demo](https://github.com/tgac-vumc/BLADE/blob/master/jupyter/BLADE%20-%20Demo%20script.ipynb).
-The environment definition is in [environment.yml](https://github.com/tgac-vumc/BLADE/environment.yml).
-
-### Step 1: Installing Miniconda 3
-First, please open a terminal or make sure you are logged into your Linux VM. Assuming that you have a 64-bit system, on Linux, download and install Miniconda 3 with:
+You can find an basic demo script under the `tutorial` folder.
+You can open the script using the command below after installing Statecope:
 
 ```
-wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh
-```
-On MacOS X, download and install with:
-
-```
-curl https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh -o Miniconda3-latest-MacOSX-x86_64.sh
-bash Miniconda3-latest-MacOSX-x86_64.sh
+jupyter notebook tutorial/BasicTutorial.ipynb
 ```
 
-### Step 2: Create a conda environment
+## Documentation
 
-You can install all the necessary dependency using the following command (may takes few minutes; `mamba` is quicker in general).
+### Website
 
-```
-conda env create --file environment.yml
-```
-
-Then, the `OncoBLADE` environment can be activate by:
-
-```
-conda activate OncoBLADE
-```
-
-### Step 3: Running a demo script
-
-You can find a demo script under `jupyter` folder.
-You can open the script using the command below after activating the `OncoBLADE` environment:
-
-```
-jupyter notebook jupyter/OncoBLADE\ -\ Demo script.ipynb
-```
-
-
-#### Demo notebook is available under `jupyter`. See below how to open it. 
+The documentation of Statescope is hosted on https://tgac-vumc.github.io/Statescopeweb/
 
 
 ## System Requirements
 
 ### Hardware Requirements
 
-OncoBLADE can run on the minimal computer spec, such as Binder (1 CPU, 2GB RAM on Google Cloud), when data size is small. However, OncoBLADE can significantly benefit from the larger amount of CPUs and RAM.
+Statescope can run on the minimal computer spec, such as Binder (1 CPU, 2GB RAM on Google Cloud), when data size is small. However, Statescope can significantly benefit from the larger amount of CPUs and RAM and can leverage GPU hardware.
 
 ### OS Requirements
 
