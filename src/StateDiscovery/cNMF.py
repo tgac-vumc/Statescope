@@ -59,7 +59,7 @@ def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=N
     else:
         nclust = K
     # Run Final model
-    cNMF_model, cophcor, consensus_matrix = cNMF(data_scaled, nclust, n_final_iter, Ncores)
+    cNMF_model, cophcors, consensus_matrix = cNMF(data_scaled, nclust, n_final_iter, Ncores)
     return cNMF_model, cophcors
 
                 
