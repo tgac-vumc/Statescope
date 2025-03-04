@@ -70,7 +70,12 @@ class CNMF(PyMFBase):
             self.H = np.zeros((self._num_bases, self._num_samples))
             
             # initialize using k-means
-            km = Kmeans(self.data[:,:], num_bases=self._num_bases)        
+            km = Kmeans(self.data[:,:], num_bases=self._num_bases)
+            
+            # use basis vectors when if they are pre-computed
+            if hasattr(self, 'W'):
+                km.W = self.W
+                
             km.factorize(niter=10)
             assign = km.assigned
     
