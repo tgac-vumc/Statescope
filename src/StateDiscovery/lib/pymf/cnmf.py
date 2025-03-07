@@ -75,9 +75,12 @@ class CNMF(PyMFBase):
             # use basis vectors when if they are pre-computed
             if hasattr(self, 'W'):
                 km.W = self.W
+                km.factorize(niter=10, compute_w=False)
+                assign = km.assigned
                 
-            km.factorize(niter=10)
-            assign = km.assigned
+            else:
+                km.factorize(niter=10)
+                assign = km.assigned
     
             num_i = np.zeros(self._num_bases)
             for i in range(self._num_bases):
