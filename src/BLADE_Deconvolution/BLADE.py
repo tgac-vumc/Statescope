@@ -459,116 +459,104 @@ def g_PY_Beta_C(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
     return grad_PY
 
 
-
 class BLADE:
     _cuda_message_printed = False
+
     def __init__(self, Y, SigmaY=0.05, Mu0=2, Alpha=1,
                  Alpha0=1, Beta0=1, Kappa0=1,
                  Nu_Init=None, Omega_Init=1, Beta_Init=None,
                  fix_Beta=False, fix_Nu=False, fix_Omega=False,
                  device=None):
-        # Set the device (GPU if available, otherwise CPU)
-        if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self.device = torch.device(device)
-        
-        
+        # Set device (GPU if available, otherwise CPU)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if device is None else torch.device(device)
+
         if not BLADE._cuda_message_printed:
-            if torch.cuda.is_available():
-                print("CUDA is available. Using GPU for computation.")
-            else:
-                print("CUDA is not available. Using CPU for computation.")
-            BLADE._cuda_message_printed = True  # Mark the message as printed
-            
-        # Convert Y to a tensor and move to the specified device
-        self.weight = 1
+            print(f"Using {'GPU' if torch.cuda.is_available() else 'CPU'} for computation.")
+            BLADE._cuda_message_printed = True
+
+        self.weight = torch.tensor(1, dtype=torch.float64, device=self.device)  # Ensuring consistency
+
+        # Convert Y to tensor
         self.Y = torch.tensor(Y, dtype=torch.float64, device=self.device)
+
+        # Get dimensions
         self.Ngene, self.Nsample = self.Y.shape
 
-        # Handle the fix parameters
-        self.Fix_par = {
-            'Beta': fix_Beta,
-            'Nu': fix_Nu,
-            'Omega': fix_Omega
-        }
+        # Fix parameters dictionary
+        self.Fix_par = {'Beta': fix_Beta, 'Nu': fix_Nu, 'Omega': fix_Omega}
 
-        if not isinstance(Mu0, torch.Tensor) and not isinstance(Mu0, np.ndarray):  # Check if Mu0 is a scalar
-            self.Ncell = Mu0
-            self.Mu0 = torch.zeros((self.Ngene, self.Ncell), dtype=torch.float64, device=self.device)
-        else:
+        # Handle Mu0
+        if isinstance(Mu0, (torch.Tensor, np.ndarray)):
             self.Ncell = Mu0.shape[1]
             self.Mu0 = torch.tensor(Mu0, dtype=torch.float64, device=self.device)
-
-        if isinstance(SigmaY, torch.Tensor):
-            self.SigmaY = SigmaY.to(self.device)
-        elif isinstance(SigmaY, np.ndarray):
-            self.SigmaY = torch.tensor(SigmaY, device=self.device)
         else:
-            self.SigmaY = torch.ones((self.Ngene, self.Nsample), dtype=torch.float64, device=self.device) * SigmaY
+            self.Ncell = Mu0  # If Mu0 is a scalar, assume it's Ncell
+            self.Mu0 = torch.zeros((self.Ngene, self.Ncell), dtype=torch.float64, device=self.device)
 
-        if isinstance(Alpha, torch.Tensor):
-            self.Alpha = Alpha.to(self.device)
-        elif isinstance(Alpha, np.ndarray):
-            self.Alpha = torch.tensor(Alpha, device=self.device)
+        # Convert SigmaY
+        if isinstance(SigmaY, (torch.Tensor, np.ndarray)):
+            self.SigmaY = torch.tensor(SigmaY, dtype=torch.float64, device=self.device)
         else:
-            self.Alpha = torch.ones((self.Nsample, self.Ncell), dtype=torch.float64, device=self.device) * Alpha
+            self.SigmaY = torch.full((self.Ngene, self.Nsample), SigmaY, dtype=torch.float64, device=self.device)
 
-        if isinstance(Omega_Init, torch.Tensor):
-            self.Omega = Omega_Init.to(self.device)
-        elif isinstance(Omega_Init, np.ndarray):
-            self.Omega = torch.tensor(Omega_Init, device=self.device)
+        # Convert Alpha
+        if isinstance(Alpha, (torch.Tensor, np.ndarray)):
+            self.Alpha = torch.tensor(Alpha, dtype=torch.float64, device=self.device)
         else:
-            self.Omega = torch.zeros((self.Ngene, self.Ncell), dtype=torch.float64, device=self.device) + Omega_Init
+            self.Alpha = torch.full((self.Nsample, self.Ncell), Alpha, dtype=torch.float64, device=self.device)
 
+        # Convert Omega_Init
+        if isinstance(Omega_Init, (torch.Tensor, np.ndarray)):
+            self.Omega = torch.tensor(Omega_Init, dtype=torch.float64, device=self.device)
+        else:
+            self.Omega = torch.full((self.Ngene, self.Ncell), Omega_Init, dtype=torch.float64, device=self.device)
+
+        # Convert Nu_Init
         if Nu_Init is None:
             self.Nu = torch.zeros((self.Nsample, self.Ngene, self.Ncell), dtype=torch.float64, device=self.device)
         else:
             self.Nu = torch.tensor(Nu_Init, dtype=torch.float64, device=self.device)
 
-        if isinstance(Beta_Init, torch.Tensor):
-            self.Beta = Beta_Init.to(self.device)
-        elif isinstance(Beta_Init, np.ndarray):
-            self.Beta = torch.tensor(Beta_Init, device=self.device)
+        # Convert Beta_Init
+        if isinstance(Beta_Init, (torch.Tensor, np.ndarray)):
+            self.Beta = torch.tensor(Beta_Init, dtype=torch.float64, device=self.device)
         else:
             self.Beta = torch.ones((self.Nsample, self.Ncell), dtype=torch.float64, device=self.device)
 
-        if isinstance(Alpha0, torch.Tensor):
-            self.Alpha0 = Alpha0.to(self.device)
-        elif isinstance(Alpha0, np.ndarray):
-            self.Alpha0 = torch.tensor(Alpha0, device=self.device)
+        # Convert Alpha0
+        if isinstance(Alpha0, (torch.Tensor, np.ndarray)):
+            self.Alpha0 = torch.tensor(Alpha0, dtype=torch.float64, device=self.device)
         else:
-            self.Alpha0 = torch.ones((self.Ngene, self.Ncell), dtype=torch.float64, device=self.device) * Alpha0
+            self.Alpha0 = torch.full((self.Ngene, self.Ncell), Alpha0, dtype=torch.float64, device=self.device)
 
-        if isinstance(Beta0, torch.Tensor):
-            self.Beta0 = Beta0.to(self.device)
-        elif isinstance(Beta0, np.ndarray):
-            self.Beta0 = torch.tensor(Beta0, device=self.device)
+        # Convert Beta0
+        if isinstance(Beta0, (torch.Tensor, np.ndarray)):
+            self.Beta0 = torch.tensor(Beta0, dtype=torch.float64, device=self.device)
         else:
-            self.Beta0 = torch.ones((self.Ngene, self.Ncell), dtype=torch.float64, device=self.device) * Beta0
+            self.Beta0 = torch.full((self.Ngene, self.Ncell), Beta0, dtype=torch.float64, device=self.device)
 
-        if isinstance(Kappa0, torch.Tensor):
-            self.Kappa0 = Kappa0.to(self.device)
-        elif isinstance(Kappa0, np.ndarray):
-            self.Kappa0 = torch.tensor(Kappa0, device=self.device)
+        # Convert Kappa0
+        if isinstance(Kappa0, (torch.Tensor, np.ndarray)):
+            self.Kappa0 = torch.tensor(Kappa0, dtype=torch.float64, device=self.device)
         else:
-            self.Kappa0 = torch.ones((self.Ngene, self.Ncell), dtype=torch.float64, device=self.device) * Kappa0
+            self.Kappa0 = torch.full((self.Ngene, self.Ncell), Kappa0, dtype=torch.float64, device=self.device)
 
     def to_device(self, device):
         self.device = torch.device(device)
 
-        # Move all tensor attributes to the new device
-        self.Y = self.Y.to(self.device)
-        self.Mu0 = self.Mu0.to(self.device)
-        self.SigmaY = self.SigmaY.to(self.device)
-        self.Alpha = self.Alpha.to(self.device)
-        self.Omega = self.Omega.to(self.device)
-        self.Nu = self.Nu.to(self.device)
-        self.Beta = self.Beta.to(self.device)
-        self.Alpha0 = self.Alpha0.to(self.device)
-        self.Beta0 = self.Beta0.to(self.device)
-        self.Kappa0 = self.Kappa0.to(self.device)
-        
+        # Move all tensor attributes to the new device and enforce float64
+        self.Y = self.Y.to(dtype=torch.float64, device=self.device)
+        self.Mu0 = self.Mu0.to(dtype=torch.float64, device=self.device)
+        self.SigmaY = self.SigmaY.to(dtype=torch.float64, device=self.device)
+        self.Alpha = self.Alpha.to(dtype=torch.float64, device=self.device)
+        self.Omega = self.Omega.to(dtype=torch.float64, device=self.device)
+        self.Nu = self.Nu.to(dtype=torch.float64, device=self.device)
+        self.Beta = self.Beta.to(dtype=torch.float64, device=self.device)
+        self.Alpha0 = self.Alpha0.to(dtype=torch.float64, device=self.device)
+        self.Beta0 = self.Beta0.to(dtype=torch.float64, device=self.device)
+        self.Kappa0 = self.Kappa0.to(dtype=torch.float64, device=self.device)
+
+            
     def Ydiff(self, Nu, Beta):
         F = self.ExpF(Beta)
         Ypred = torch.matmul(torch.exp(Nu), F.T)
@@ -596,17 +584,15 @@ class BLADE:
 
     # Expectation of log P(F)
     def Estep_PF(self, Beta):
-        # Summing across the last dimension (across cells)
-        term1 = torch.sum(torch.special.gammaln(self.Alpha), dim=-1)  # Shape: (Nsample,)
-        term2 = torch.special.gammaln(torch.sum(self.Alpha, dim=-1))  # Shape: (Nsample,)
+        # Torch version: note the modification to add term3 rather than subtract it.
+        term1 = torch.sum(torch.special.gammaln(self.Alpha), dim=-1)  # Sum over cells per sample.
+        term2 = torch.special.gammaln(torch.sum(self.Alpha, dim=-1))   # gammaln(sum(alpha)) per sample.
+        digamma_Beta = torch.special.digamma(Beta)                      # Element-wise digamma.
+        digamma_Beta_sum = torch.special.digamma(torch.sum(Beta, dim=-1)).unsqueeze(1)  # Broadcasting.
+        term3 = torch.sum((self.Alpha - 1) * (digamma_Beta - digamma_Beta_sum), dim=-1)
+        # Modified return: note the plus sign before term3.
+        return -(torch.sum(term1 - term2)) + torch.sum(term3)
 
-        digamma_Beta = torch.special.digamma(Beta)  # Shape: (Nsample, Ncell)
-        digamma_Beta_sum = torch.special.digamma(torch.sum(Beta, dim=-1)).unsqueeze(1)  # Shape: (Nsample, 1)
-
-        term3 = torch.sum((self.Alpha - 1) * (digamma_Beta - digamma_Beta_sum), dim=-1)  # Shape: (Nsample,)
-
-        # Summing the final result to get a scalar (total loss or score)
-        return -(torch.sum(term1 - term2) + torch.sum(term3))
 
     # Expectation of log Q(X)
     def Estep_QX(self, Omega):
@@ -642,7 +628,7 @@ class BLADE:
                           self.Mu0, self.Alpha0, self.Beta0, self.Kappa0, self.Ngene, self.Ncell, self.Nsample, self.weight)
 
     def g_Exp_Beta(self, Nu, Beta, B0):
-        return g_Exp_Beta(Nu, Omega, Beta, B0, self.Ngene, self.Ncell, self.Nsample)
+        return g_Exp_Beta_C(Nu, Omega, Beta, B0, self.Ngene, self.Ncell, self.Nsample)
 
     def grad_Beta(self, Nu, Omega, Beta):
         # B0 is the sum of Beta over the Ncell dimension (axis 1)
@@ -835,27 +821,23 @@ class BLADE:
         self.Alpha = torch.tensor(self.Alpha, device=self.device)
 
 
-    def Update_Alpha_Group(self, Expected=None, Temperature=None):# if Expected fraction is given, that part will be fixed
-        # Updating Alpha
-        AvgBeta = torch.mean(self.Beta, 0)
+    def Update_Alpha_Group(self, Expected=None, Temperature=None):
+        AvgBeta = torch.mean(self.Beta, dim=0)
         Fraction_Avg = AvgBeta / torch.sum(AvgBeta)
 
-        if Expected is not None:  # Reflect the expected values
-            # expectaion can be a diction (with two keys; Group and Expectation) or just a matrix
-            if type(Expected) is dict:
-                if "Group" in Expected:  # Group (Ngroup by Nctype matrix) indicates a group of cell types with known collective fraction
-                    Group = Expected['Group']
-                else:
-                    Group = torch.eye(Expected['Expectation'].shape[1], device=self.device)
+        if Expected is not None:
+            if isinstance(Expected, dict):
+                Group = Expected.get('Group', torch.eye(Expected['Expectation'].shape[1], device=self.device))
                 Expected = Expected['Expectation']
             else:
                 Group = torch.eye(Expected.shape[1], device=self.device)
 
             if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
                 raise ValueError('Pre-determined fraction is in wrong shape (should be Nsample by Ncelltype)')
-            Expected = torch.tensor(Expected, device=self.device)
 
-            # rescale the fraction to meet the expected fraction
+            Expected = torch.tensor(Expected, device=self.device)
+            Group = torch.tensor(Group, device=self.device)
+
             for sample in range(self.Nsample):
                 Fraction = Fraction_Avg.clone()
                 IndG = torch.where(~torch.isnan(Expected[sample, :]))[0]
@@ -863,19 +845,86 @@ class BLADE:
                 IndCells = []
                 for group in IndG:
                     IndCell = torch.where(Group[group, :] == 1)[0]
-                    Fraction[IndCell] = Fraction[IndCell] / torch.sum(Fraction[IndCell])
-                    Fraction[IndCell] = Fraction[IndCell] * Expected[sample, group]
+                    group_sum = torch.sum(Fraction[IndCell])
+                    Fraction[IndCell] /= group_sum if (group_sum := torch.sum(Fraction[IndCell])) > 0 else 1.0
+                    Fraction[IndCell] *= Expected[sample, group]
                     IndCells.extend(IndCell.tolist())
 
-                IndNan = torch.tensor(list(set(range(Group.shape[1])) - set(IndCells)), device=Fraction.device)
-                Fraction[IndNan] = Fraction[IndNan] / torch.sum(Fraction[IndNan])
-                Fraction[IndNan] = Fraction[IndNan] * (1 - torch.sum(Expected[sample, IndG]))
+                # Ensuring proper ordering of indices:
+                all_indices = torch.arange(Group.shape[1], device=self.device)
+                mask = torch.ones(Group.shape[1], dtype=torch.bool, device=self.device)
+                mask[IndCells] = False
+                IndNan = all_indices[mask]
+
+                remaining_fraction = 1 - torch.sum(Expected[sample, IndG])
+                Fraction[IndNan] /= torch.sum(Fraction[IndNan])
+                Fraction[IndNan] *= remaining_fraction
 
                 AlphaSum = torch.sum(AvgBeta[IndNan]) / torch.sum(Fraction[IndNan])
                 self.Alpha[sample, :] = Fraction * AlphaSum
         else:
-            for sample in range(self.Nsample):
-                self.Alpha[sample,:] = AvgBeta
+            self.Alpha = AvgBeta.repeat(self.Nsample, 1)
+
+
+    # def Update_Alpha_Group_old(self, Expected=None, Temperature=None):  # if Expected fraction is given, that part will be fixed
+    #     # Updating Alpha
+    #     AvgBeta = torch.mean(self.Beta, 0)
+    #     Fraction_Avg = AvgBeta / torch.sum(AvgBeta)
+    #     #print("Initial Fraction_Avg:", Fraction_Avg)
+
+    #     if Expected is not None:  # Reflect the expected values
+    #         # Expectation can be a dictionary (with two keys; Group and Expectation) or just a matrix
+    #         if type(Expected) is dict:
+    #             if "Group" in Expected:  # Group (Ngroup by Nctype matrix) indicates a group of cell types with known collective fraction
+    #                 Group = Expected['Group']
+    #             else:
+    #                 Group = torch.eye(Expected['Expectation'].shape[1], device=self.device)
+    #             Expected = Expected['Expectation']
+    #         else:
+    #             Group = torch.eye(Expected.shape[1], device=self.device)
+
+    #         if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
+    #             raise ValueError('Pre-determined fraction is in wrong shape (should be Nsample by Ncelltype)')
+    #         Expected = torch.tensor(Expected, device=self.device)
+    #         #print("Expected values:\n", Expected)
+    #         #print("Group matrix:\n", Group)
+
+    #         # rescale the fraction to meet the expected fraction
+    #         for sample in range(self.Nsample):
+    #             Fraction = Fraction_Avg.clone()
+    #             #print(f"\nSample {sample}:")
+    #             #print("  Initial Fraction:", Fraction)
+
+    #             # Get indices of expected cell types (non-NaN)
+    #             IndG = torch.where(~torch.isnan(Expected[sample, :]))[0]
+    #             #print("  IndG (indices with expectations):", IndG)
+
+    #             IndCells = []
+    #             for group in IndG:
+    #                 IndCell = torch.where(Group[group, :] == 1)[0]
+    #                 #print("    Group:", group.item(), "-> IndCell:", IndCell)
+    #                 # Normalize fractions in the group to sum to 1
+    #                 Fraction[IndCell] = Fraction[IndCell] / torch.sum(Fraction[IndCell])
+    #                 #print("    Normalized Fraction for group:", Fraction[IndCell])
+    #                 # Multiply by the expected value for that group
+    #                 Fraction[IndCell] = Fraction[IndCell] * Expected[sample, group]
+    #                 #print("    Adjusted Fraction for group:", Fraction[IndCell])
+    #                 IndCells.extend(IndCell.tolist())
+
+    #             IndNan = torch.tensor(list(set(range(Group.shape[1])) - set(IndCells)), device=Fraction.device)
+    #             #print("  IndNan (cell types with no expectation):", IndNan)
+    #             Fraction[IndNan] = Fraction[IndNan] / torch.sum(Fraction[IndNan])
+    #             Fraction[IndNan] = Fraction[IndNan] * (1 - torch.sum(Expected[sample, IndG]))
+    #             #print("  Adjusted Fraction for non-specified cells:", Fraction[IndNan])
+
+    #             AlphaSum = torch.sum(AvgBeta[IndNan]) / torch.sum(Fraction[IndNan])
+    #             #print("  AlphaSum:", AlphaSum)
+    #             self.Alpha[sample, :] = Fraction * AlphaSum
+    #             #print("  Updated Alpha for sample:", self.Alpha[sample, :])
+    #     else:
+    #         for sample in range(self.Nsample):
+    #             self.Alpha[sample, :] = AvgBeta
+
 
 
     def Update_SigmaY(self, SampleSpecific=False):
@@ -978,7 +1027,7 @@ def Iterative_Optimization(X, stdX, Y, Alpha, Alpha0, Kappa0, SY, Rep, Init_Frac
         # print("    Time (s) obj.Optimizer()", e3 - s3)
         # s4 = timer()
         obj.Update_Alpha_Group(Expected=Expected)
-        # print(type(obj.Nu))
+        #print(type(obj.Nu))
         # e4 = timer()
         # print("    Time (s) obj.Update_Alpha_Group", e4 - s4)
         # s5 = timer()
@@ -1071,6 +1120,7 @@ def Framework_Iterative(X, stdX, Y, Ind_Marker=None,
         conv = convs[np.nanargmax(cri)]
 
     return out, conv, zip(outs, cri), args
+
 
 
 #########NUMBA functions for purification########
