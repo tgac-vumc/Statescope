@@ -104,15 +104,6 @@ def looks_logged(adata, max_cutoff=50, int_tolerance=0.99):
     if (frac_part < 1e-10).mean() > int_tolerance:
         return False          # almost all integers → raw
 
-    # 3) total-count correlation
-    totals = X.sum(axis=1)
-    means  = X.mean(axis=1)
-    rho    = np.corrcoef(totals, means)[0, 1]
-    if rho < 0.2:
-        return True
-    if rho > 0.7:
-        return False
-
     # ambiguous
     return None
 
