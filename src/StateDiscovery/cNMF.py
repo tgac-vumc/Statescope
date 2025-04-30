@@ -16,6 +16,7 @@
 # History:
 #  09-01-2024: File creation, write code
 #  13-12-2024: Edits for Statescope FrameWork
+#  29-04-2025: New version with set your own k functionality 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
@@ -36,31 +37,87 @@ from joblib import Parallel, delayed
 #-------------------------------------------------------------------------------
 # 3.1 Run cNMF analysis
 #------------------------------------------------------------------------------- 
-def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=None,n_iter=10,n_final_iter=100,min_cophenetic=0.95,max_clusters=10,Ncores=10):
-    data_scaled = Create_Cluster_Matrix(GEX,Omega,Fractions,celltype,weighing)
-    # Run Initial cNMF runs
-    data_dict = dict()
-    if K == None:
-        for k in range(2,max_clusters):
-            cNMF_model, cophcor, consensus_matrix = cNMF(data_scaled, k, n_iter, Ncores)
-            H = cNMF_model.H
-            cluster_assignments = []
-            for i in range(H.shape[1]):
-                cluster_assignments.append(int(np.where(H[:,i] == max(H[:,i]))[0] + 1))    
-            data_dict[k] = {'model':cNMF_model,'cophcor':cophcor, 'consensus': consensus_matrix,'cluster_assignments':cluster_assignments}
+def StateDiscovery_FrameWork(
+        GEX, Omega, Fractions, celltype,
+        weighing='Omega',
+        K=None,
+        n_iter=10,
+        n_final_iter=100,
+        min_cophenetic=0.95,
+        max_clusters=10,
+        Ncores=10):
+    """
+      Run the cNMF‐based state-discovery workflow for a single cell type.
 
-        # Determine K
-        cophcors = [d['cophcor'] for d in data_dict.values()]
-        ks = [k for k in data_dict.keys()]
-        nclust = find_threshold(cophcors,ks,min_cophenetic)
-        drop = biggest_drop(cophcors)
-        if not nclust:
-            nclust = drop
+      :param GEX:           Purified gene-expression matrix (genes × samples).
+      :param Omega:         Gene-wise variance estimates for the same genes.
+      :param Fractions:     Cell-type fractions per sample (used by some
+                            weighing modes).
+      :param celltype:      Name of the cell type being analysed (for logging).
+      :param weighing:      Scaling applied in ``Create_Cluster_Matrix``  
+                            (``'Omega'`` | ``'OmegaFractions'`` | ``'centering'``
+                            | ``'no_weighing'``).
+      :param K:             Desired number of states.  
+                            • *None* ⇒ run a cophenetic sweep to choose *k*  
+                            • int   ⇒ use that value and skip the sweep.
+      :param n_iter:        Number of cNMF restarts **per k** during the sweep.
+      :param n_final_iter:  Restarts for the final model at the chosen *k*.
+      :param min_cophenetic:Threshold for the cophenetic coefficient; the first
+                            k ≥ this value is selected.
+      :param max_clusters:  Maximum k tested in the sweep (upper bound, excl.).
+      :param Ncores:        CPU cores used for parallel cNMF runs.
+
+      :return: ``(final_model, coeffs)``, where *coeffs* is the full list of
+              cophenetic coefficients if a sweep was run, otherwise the single
+              final coefficient.
+      """
+    # build the cluster matrix 
+    data_scaled = Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing)
+
+    data_dict   = {}         
+    sweep_curve = None        # list of cophenetic coefficients if we sweep
+
+   
+    # 1) cophenetic sweep  (only when K is None)
+ 
+    if K is None:
+        for k in range(2, max_clusters):
+            cNMF_model_k, cophcor_k, consensus_k = cNMF(data_scaled, k, n_iter, Ncores)
+
+            
+            H = cNMF_model_k.H
+            cluster_assignments = [
+                int(np.where(H[:, i] == H[:, i].max())[0] + 1)
+                for i in range(H.shape[1])
+            ]
+            data_dict[k] = {
+                "model":              cNMF_model_k,
+                "cophcor":            cophcor_k,
+                "consensus":          consensus_k,
+                "cluster_assignments": cluster_assignments,
+            }
+
+        ks         = sorted(data_dict)
+        sweep_curve = [data_dict[k]["cophcor"] for k in ks]
+        nclust      = find_threshold(sweep_curve, ks, min_cophenetic) \
+                      or biggest_drop(sweep_curve)
     else:
         nclust = K
-    # Run Final model
-    cNMF_model, cophcors, consensus_matrix = cNMF(data_scaled, nclust, n_final_iter, Ncores)
-    return cNMF_model, cophcors
+
+  
+    # 2) final long run at chosen k
+  
+    cNMF_model, cophcors_final, consensus_matrix = \
+        cNMF(data_scaled, nclust, n_final_iter, Ncores)
+
+
+    # 3) return 
+ 
+    if sweep_curve is not None:
+        return cNMF_model, sweep_curve     # list of coefficients
+    else:
+        return cNMF_model, cophcors_final  # single float
+
 
                 
     
