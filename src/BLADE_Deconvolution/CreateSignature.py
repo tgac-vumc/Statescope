@@ -15,6 +15,8 @@
 #  15-12-2024: File creation, write code
 #  08-01-2025: Add python implementation of scran fitTrendVar, ChatGPT version
 #              (tested, copmared to R scran function)
+# 30-04-2025: Functions fixed, added more informative print statements, refined functionality and added more parameters to the functions
+
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
@@ -78,13 +80,50 @@ def fitTrendVar(means,variances, min_mean = 0.1,frac = 0.025, parametric=True, l
     return  corrected_fit
 
 
+def looks_logged(adata, max_cutoff=50, int_tolerance=0.99):
+    """
+    Heuristically decide if ``adata.X`` is log-transformed.
+
+    Returns True / False  (or None if it’s ambiguous).
+    """
+    X = adata.X
+    if hasattr(X, "_view_args"):   # AnnData view
+        X = X.copy()
+
+    if sp.issparse(X):
+        X = X.toarray()  
+
+    # 1) value-range heuristic
+    if X.max() > max_cutoff:
+        return False          # definitely raw
+
+    # 2) integer-ness heuristic
+    frac_part = np.abs(X - np.rint(X))
+    if (frac_part < 1e-10).mean() > int_tolerance:
+        return False          # almost all integers → raw
+
+    # 3) raw layer present?
+    if getattr(adata, "raw", None) is not None:
+        return True           # Scanpy default after log1p
+
+    # 4) total-count correlation
+    totals = X.sum(axis=1)
+    means  = X.mean(axis=1)
+    rho    = np.corrcoef(totals, means)[0, 1]
+    if rho < 0.2:
+        return True
+    if rho > 0.7:
+        return False
+
+    # ambiguous
+    return None
+
+
+
 def Check_adata_validity(adata, celltype_key='celltype'):
-    """
-    Check the validity of an AnnData object and report descriptive statistics and potential issues.
-    :param AnnData adata: Single-cell data in AnnData format.
-    :param str celltype_key: column in adata.obs specifying cell types [default = 'celltype']
-    """
-    print("\n=== Validating AnnData Object ===")
+    
+    
+    print("\n=== Validating AnnData scRNAseq Object ===")
 
     # Determine if the data matrix is sparse
     is_sparse = sp.issparse(adata.X)
@@ -100,24 +139,25 @@ def Check_adata_validity(adata, celltype_key='celltype'):
 
     print("No negative values found in the data matrix (adata.X).")
 
-    ###CHECK AGAIN NEEDS FIXING 
-    # Check if normalization and log transformation were performed
-    if 'log1p' not in adata.uns:
-        raise AssertionError(
-            "The data does not appear to be log-transformed. "
-            "Please use Scanpy's `sc.pp.normalize_total(adata, target_sum=1e4)` and `sc.pp.log1p(adata)`."
-        )
+    is_logged = looks_logged(adata)
+    if is_logged is False:
+        raise AssertionError("adata.X looks like raw counts; please normalise & log-transform.")
+    elif is_logged is None:
+        print("Warning: unable to decide confidently whether adata.X is logged.")
+    else:
+        print("Log-normalised data detected.")
 
-    print("Validation passed: Data appears to be log-transformed.")
     
-    # Check if the data is scaled to 1e4
-    total_counts = adata.X.sum(axis=1).A1 if is_sparse else adata.X.sum(axis=1)
+    # # Check if the data is scaled to 1e4
+    # total_counts = adata.X.sum(axis=1).A1 if is_sparse else adata.X.sum(axis=1)
     
     # Check for excessively large values
-    max_value = adata.X.max() if not is_sparse else adata.X.data.max()
-    print(f"Maximum value in the data matrix (adata.X): {max_value}")
-    if max_value > 100:
-        print("Warning: Extremely large values detected in the data matrix (adata.X).  This might influence performance. adata.X has to be in log, library-size corrected format.")
+    # max_value = adata.X.max() if not is_sparse else adata.X.data.max()
+    # print(f"Maximum value in the data matrix (adata.X): {max_value}")
+    # if max_value > 100:
+    #     print("Warning: Extremely large values detected in the data matrix (adata.X).  This might influence performance. adata.X has to be in log, library-size corrected format.")
+
+
 
     # Check the number of cells and genes
     num_cells, num_genes = adata.shape
@@ -125,27 +165,44 @@ def Check_adata_validity(adata, celltype_key='celltype'):
     print(f"Number of genes: {num_genes}")
 
 
-    # Calculate total counts and check for outlier cells
-    median_total_counts = np.median(total_counts)
-    mad_total_counts = np.median(np.abs(total_counts - median_total_counts))
-    upper_threshold = median_total_counts + 3 * mad_total_counts
-    lower_threshold = median_total_counts - 3 * mad_total_counts
-    outlier_cells = np.sum((total_counts > upper_threshold) | (total_counts < lower_threshold))
-    print(f"Number of outlier cells based on total counts: {outlier_cells}")
+        
+    # # Calculate total counts per cell and define outlier thresholds
+    # median_total = np.median(total_counts)
+    # mad_total = np.median(np.abs(total_counts - median_total))
+    # lower_total_thresh = median_total - 3 * mad_total
+    # upper_total_thresh = median_total + 3 * mad_total
+    # num_outlier_cells = np.sum((total_counts < lower_total_thresh) | (total_counts > upper_total_thresh))
 
-    gene_counts = adata.X.sum(axis=0).A1 if is_sparse else adata.X.sum(axis=0)
-    median_gene_counts = np.median(gene_counts)
-    mad_gene_counts = np.median(np.abs(gene_counts - median_gene_counts))
-    upper_gene_threshold = median_gene_counts + 3 * mad_gene_counts
-    highly_expressed_genes = np.sum(gene_counts > upper_gene_threshold)
-    print(f"Number of genes with extremely high expression: {highly_expressed_genes}")
+    # # Calculate total gene expression and define a threshold for highly expressed genes
+    # if is_sparse:
+    #     gene_totals = adata.X.sum(axis=0).A1
+    # else:
+    #     gene_totals = np.sum(adata.X, axis=0)
+    # median_gene = np.median(gene_totals)
+    # mad_gene = np.median(np.abs(gene_totals - median_gene))
+    # upper_gene_thresh = median_gene + 3 * mad_gene
+    # num_high_expr_genes = np.sum(gene_totals > upper_gene_thresh)
 
-    
-    # Check for specified cell types if provided in adata.obs
+    # # Construct and print a summary message
+    # print("=== QC Summary ===")
+    # print(f"Total counts per cell:")
+    # print(f"  - Median: {median_total:.2f}")
+    # print(f"  - Median Absolute Deviation (MAD): {mad_total:.2f}")
+    # print(f"  - Lower threshold (median - 3*MAD): {lower_total_thresh:.2f}")
+    # print(f"  - Upper threshold (median + 3*MAD): {upper_total_thresh:.2f}")
+    # print(f"  -> Outlier cells (counts outside this range): {num_outlier_cells} out of {len(total_counts)} cells")
+    # print("")
+    # print("Gene expression summary:")
+    # print(f"  - Median total gene expression: {median_gene:.2f}")
+    # print(f"  - MAD: {mad_gene:.2f}")
+    # print(f"  - Threshold for high expression (median + 3*MAD): {upper_gene_thresh:.2f}")
+    # print(f"  -> Genes with extremely high expression: {num_high_expr_genes} genes")
+
+        
+    # # Check for specified cell types if provided in adata.obs
     if celltype_key in adata.obs:
         unique_cell_types = adata.obs[celltype_key].unique()
         print(f"Cell types present: {list(unique_cell_types)}")
-        print(f"Number of unique cell types: {len(unique_cell_types)}")
     else:
         raise AssertionError(f"No cell type information available under the specified key '{celltype_key}'.")
 
@@ -162,11 +219,56 @@ def Check_adata_validity(adata, celltype_key='celltype'):
     for key, value in data_summary.items():
         print(f"  {key}: {value}")
 
-    print("\nValidation complete.")
+    # print("\nValidation complete.")
+
+# ──────────────────────────────────────────────────────────────────────────
+# Bland–Altman QC   (Bulk  vs.  raw scRNA counts in `adata.X`)
+# ──────────────────────────────────────────────────────────────────────────
+def bland_altman_bulk_vs_scrna(Bulk: pd.DataFrame,
+                               adata: ad.AnnData,
+                               *,
+                               cutoff: float = 1.96,
+                               return_outliers: bool = False) -> None:
+    """
+    Print how many genes show bulk–scRNA disagreement outside ±cutoff·SD.
+
+    Parameters
+    ----------
+    Bulk   : DataFrame
+        Bulk-expression matrix (genes × samples).
+    adata  : AnnData
+        The **same** AnnData you pass to ``CreateSignature``; gene index must
+        overlap Bulk’s.
+    cutoff : float, default 1.96
+        Multiples of the SD that define the limits of agreement.
+    """
+    common = Bulk.index.intersection(adata.var_names)
+    if len(common) == 0:
+        print("Bland-Altman: no common genes — skipped.")
+        return set() if return_outliers else None
+
+    X = adata[:, common].X
+    if sp.issparse(X):
+        X = X.toarray()
+
+    scrna_mean = X.mean(axis=0)                 # (n_genes,)
+    bulk_mean  = Bulk.loc[common].mean(axis=1).values
+    diff       = scrna_mean - bulk_mean
+    mdiff      = diff.mean()
+    sdiff      = diff.std()
+    upper      = mdiff + cutoff * sdiff
+    lower      = mdiff - cutoff * sdiff
+    mask_out   = (diff > upper) | (diff < lower)
+    n_sig      = mask_out.sum()
+
+    print(f"{n_sig}/{len(common)} gene expression differ between bulk and signature "
+            f"beyond ±{cutoff:.2f}·SD ")
+    
+    if return_outliers:
+        return set(common[mask_out])
 
 
-
-def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_highly_variable=3000):
+def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_highly_variable=2000, fixed_n_features = None, MarkerList = None, Bulk: pd.DataFrame | None = None, drop_sigdiff: bool = False):
     """ 
     Create Signature from AnnData object.
     :param AnnData adata: phenotyped scRNAseq data with: adata.X (log, library-size corrected) 
@@ -176,18 +278,17 @@ def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_high
     :returns: pandas.DataFrame Signature: Signature for deconvolution
     """
 
-
     # Validate the AnnData object
     Check_adata_validity(adata, celltype_key)
+
 
     print("\n=== Creating Signature ===")
 
     # Check if the celltype_key exists in adata.obs
-    ###move it to validity script
     if celltype_key not in adata.obs:
         raise AssertionError(f"{celltype_key} is not in adata.obs. Specify which column contains the cell phenotypes")
 
-    ### Drop cells with missing cell type annotations
+    # Drop cells with missing cell type annotations
     missing_count = adata.obs[celltype_key].isna().sum()
     if missing_count > 0:
         print(f"Warning: {missing_count} cells have missing '{celltype_key}' annotations. These cells will be excluded.")
@@ -198,13 +299,17 @@ def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_high
     # Define cell types
     celltypes = pd.unique(adata.obs[celltype_key])
 
+    
+
+    
+
     # Calculate mean and std expression in cell types
     print("Calculating mean and standard deviation expressions for each cell type.")
     scExp = pd.concat(
         [
             pd.DataFrame(
                 np.mean(adata[adata.obs[celltype_key] == ct].X.toarray(), axis=0).transpose(),
-                columns=[f"scExp_{str(ct)}"],  # Ensure `ct` is a string
+                columns=[f"scExp_{str(ct)}"],  
                 index=adata.var_names,
             )
             for ct in celltypes
@@ -216,13 +321,16 @@ def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_high
         [
             pd.DataFrame(
                 np.std(adata[adata.obs[celltype_key] == ct].X.toarray(), axis=0).transpose(),
-                columns=[f"scVar_{str(ct)}"],  # Ensure `ct` is a string
+                columns=[f"scVar_{str(ct)}"],  
                 index=adata.var_names,
             )
             for ct in celltypes
         ],
         axis=1,
-    ).replace(0, 0.001)  # Replace 0s with a small pseudovalue
+    )
+    # Add 0.01 to all values (instead of replacing zeros)
+    scVar = scVar + 0.01
+
     print("Expression calculations completed.")
 
     # Correct variance if needed
@@ -238,74 +346,346 @@ def CreateSignature(adata, celltype_key='celltype', CorrectVariance=True, n_high
                 for ct in celltypes
             ],
             axis=1,
-        ).replace(0, 0.001)
+        )
+        scVar = scVar + 0.01
+
+       
         scVar = pd.concat(
             [fitTrendVar(scExp[f"scExp_{ct}"], scVar[f"scVar_{ct}"]) for ct in celltypes],
             axis=1,
-        ).replace(0, 0.001)
+        )
+        # Add 0.01 to all values again, after fitTrendVar
+        scVar = scVar + 0.01
+        
+        # Rename columns
         scVar.columns = [col.replace("scExp", "scVar") for col in scVar.columns]
         print("Variance correction completed.")
 
-    print("Running AutoGeneS to select marker genes.")
-    # Run AutoGeneS and define markers
-    AutoGeneS = Run_AutoGeneS(adata, celltype_key, n_highly_variable)
-    IsMarker = pd.DataFrame(
-        {"IsMarker": [(gene in AutoGeneS) for gene in adata.var_names]}, index=adata.var_names
-    )
-    
-    print("AutoGeneS completed. Compiling the final signature matrix.")
+    g_mean = scExp.values.flatten()
+    g_var  = scVar.values.flatten()
+    print(f"» Gene‐wise *means*  range:  min={g_mean.min():.3f}  "
+          f"max={g_mean.max():.3f}")
+    print(f"» Gene‐wise *vars*   range:  min={g_var.min():.3f}  "
+          f"max={g_var.max():.3f}")
 
-    # Concatenate dataframes to create the signature
+    if g_var.min() < 1e-6 or g_var.max() > 10:
+        print("Warning: extremely small or extremely large variances detected; "
+              "this may affect downstream performance.")
+
+    if MarkerList:
+        print("MarkerList provided by user – AutoGeneS will be skipped.")
+        IsMarker = pd.Series(
+            adata.var_names.isin(MarkerList),
+            index=adata.var_names,
+            name="IsMarker"
+        )
+    else:
+        print("Running AutoGeneS to select marker genes.")
+        AutoGenes = Run_AutoGeneS(
+            adata,
+            celltype_key=celltype_key,
+            n_highly_variable=n_highly_variable,
+            fixed_n_features=fixed_n_features
+        )
+        print(f"{len(AutoGenes)} marker genes selected by AutoGeneS.")
+
+        print("AutoGeneS completed. Compiling the final signature matrix.")
+        IsMarker = pd.Series(
+            adata.var_names.isin(AutoGenes),
+            index=adata.var_names,
+            name="IsMarker"
+        )
+
+    # ---- Assemble signature ------------------------------------------- #
     Signature = pd.concat([IsMarker, scExp, scVar], axis=1)
     Signature.index = adata.var_names
-    
     print("Signature matrix creation complete.")
+
+    if Bulk is not None:
+        outliers = bland_altman_bulk_vs_scrna(
+            Bulk, adata, return_outliers=drop_sigdiff
+        )
+        if drop_sigdiff and outliers:
+            before = Signature.shape[0]
+            Signature = Signature.drop(outliers, errors="ignore")
+            print(f"Removed {before - Signature.shape[0]} "
+                    f"Genes with significantly differing expression levels between bulk and signature")
 
     return Signature
 
-def Run_AutoGeneS(adata, celltype_key, n_highly_variable=3000):
-    """ 
-    Perform AutoGeneS marker selection from AnnData object
-    :param AnnData adata: phenotyped scRNAseq data with: adata.X (log, library-size corrected) 
-    :param str celltype_key: column in adata.obs containing cell phenotypes [default = 'celltype']
-    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection [default = 3000]
+
+
+def _get_mean_var(X):
+    """
+    Calculate mean and variance for each gene across cells.
     
-    :returns: list AutoGeneS: list of marker genes
+    Parameters
+    ----------
+    X : np.ndarray or sp.sparse.spmatrix
+        Expression matrix (cells × genes).
+        
+    Returns
+    -------
+    mean : np.ndarray
+        Mean expression for each gene.
+    var : np.ndarray
+        Variance expression for each gene.
+    """
+    if sp.issparse(X):
+        mean = X.mean(axis=0)
+        var = X.power(2).mean(axis=0) - np.square(mean)
+        mean = mean.A1
+        var = var.A1
+    else:
+        mean = np.mean(X, axis=0)
+        var = np.var(X, axis=0)
+    return mean, var
+
+
+def seurat_hvg_custom(
+    adata,
+    n_top_genes: int | None = None,
+    min_disp: float = 0.5,
+    max_disp: float = float('inf'),
+    min_mean: float = 0.0125,
+    max_mean: float = 3,
+    n_bins: int = 20,
+) -> pd.Index:
+    
+    """
+Select highly-variable genes (HVGs) with a Seurat-style workflow.
+
+The function reproduces the “Seurat” flavour of Scanpy’s
+*highly_variable_genes*:
+
+1.  Revert log-transformed counts back to linear space (handles
+    ``adata.uns['log1p']`` if present).
+2.  Compute gene-wise mean and variance, then raw dispersion =
+    *variance / mean*.
+3.  Log-transform both mean and dispersion to stabilise scale.
+4.  Bin genes by mean expression (*n_bins*) and normalise dispersion in
+    each bin:  
+    *(dispersion – bin-mean) / bin-sd*.
+5.  **Return**  
+    • the top *n_top_genes* by normalised dispersion **or**  
+    • genes that satisfy user-defined cut-offs on mean and dispersion.
+
+Parameters
+----------
+adata : AnnData
+    Single-cell object whose ``adata.X`` contains **raw counts** that have
+    already been log-normalised via *sc.pp.log1p*.
+n_top_genes : int | None, default ``None``
+    If given, ignore all cut-offs and simply return the *n_top_genes*
+    genes with the largest normalised dispersion.
+min_disp, max_disp : float, default 0.5, ∞
+    Lower / upper thresholds applied to the *normalised* dispersion when
+    *n_top_genes is None*.
+min_mean, max_mean : float, default 0.0125, 3
+    Lower / upper thresholds applied to the (log-scaled) mean expression
+    when *n_top_genes is None*.
+n_bins : int, default 20
+    Number of expression bins used for dispersion normalisation.
+
+Returns
+-------
+pandas.Index
+    Index of gene names flagged as highly variable.
+"""
+    # Get the data matrix
+    X = adata.X
+
+    # Handle log1p transformation
+    if hasattr(X, "_view_args"):  # AnnData array view
+        X = X.copy()
+
+    X = X.copy()
+    log1p_info = adata.uns.get("log1p", {})
+    base = log1p_info.get("base", None)
+    if base is not None:
+        X *= np.log(base)
+    # use out if possible. only possible since we copy the data matrix
+    if isinstance(X, np.ndarray):
+        np.expm1(X, out=X)
+    else:
+        X = np.expm1(X)
+
+    # Compute mean and variance
+    mean, var = _get_mean_var(X)
+    
+    # Compute dispersion
+    mean[mean == 0] = 1e-12  # set entries equal to zero to small value
+    dispersion = var / mean
+    
+    # Logarithmize mean and dispersion as in Seurat
+    dispersion[dispersion == 0] = np.nan
+    dispersion = np.log(dispersion)
+    mean = np.log1p(mean)
+    
+    # Create DataFrame with metrics
+    df = pd.DataFrame(dict(zip(["means", "dispersions"], (mean, dispersion))))
+    df.index = adata.var_names  # Set gene names as index
+    
+    # Bin genes by mean expression
+    df["mean_bin"] = pd.cut(df["means"], bins=n_bins)
+    
+    # Compute bin statistics
+    disp_grouped = df.groupby("mean_bin", observed=True)["dispersions"]
+    disp_bin_stats = disp_grouped.agg(avg="mean", dev="std")
+    
+    # Handle single-gene bins
+    one_gene_per_bin = disp_bin_stats["dev"].isnull()
+    if one_gene_per_bin.any():
+        disp_bin_stats.loc[one_gene_per_bin, "dev"] = disp_bin_stats.loc[one_gene_per_bin, "avg"]
+        disp_bin_stats.loc[one_gene_per_bin, "avg"] = 0
+    
+    # Map bin statistics back to genes
+    df["avg"] = df["mean_bin"].map(disp_bin_stats["avg"]).astype(float)
+    df["dev"] = df["mean_bin"].map(disp_bin_stats["dev"]).astype(float)
+    
+    # Compute normalized dispersion
+    df["dispersions_norm"] = (df["dispersions"] - df["avg"]) / df["dev"]
+    
+    if n_top_genes is not None:
+        # When n_top_genes is provided, ignore all cutoffs and just select top genes
+        # by normalized dispersion.
+        df = df.sort_values("dispersions_norm", ascending=False, na_position="last")
+        df["highly_variable"] = np.arange(df.shape[0]) < n_top_genes
+    else:
+        # Apply cutoff thresholds
+        df["highly_variable"] = (
+            (df["means"] > min_mean) & 
+            (df["means"] < max_mean) & 
+            (df["dispersions_norm"] > min_disp) & 
+            (df["dispersions_norm"] < max_disp)
+        )
+    
+    # Return gene names from the DataFrame index
+    return df.index[df["highly_variable"]]
+
+
+# import scanpy as sc
+
+
+
+
+def Run_AutoGeneS(
+    adata,
+    celltype_key,
+    n_highly_variable,
+    fixed_n_features,
+):
+    """ 
+    Perform AutoGeneS marker selection from an AnnData object.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Phenotyped scRNAseq data with adata.X (log, library-size corrected).
+    celltype_key : str
+        Column in adata.obs containing cell phenotypes.
+    n_highly_variable : int or None, default=3000
+        Number of highly variable genes (HVGs) to select for AutoGeneS marker detection.
+        If set to None, HVGs are selected solely based on cutoff thresholds.
+    fixed_n_features : int or None, default=None
+        If provided, the number of genes to fix for the final solution
+        (AutoGeneS will be run in 'fixed' mode).
+    
+    Returns
+    -------
+    AutoGenes : list
+        List of marker genes selected by AutoGeneS.
     """
     print("\n=== Gene Selection  ===")
 
     # Ensure data is in dense array format if needed
-    if isinstance(adata.X, np.ndarray):
-        data_array = adata.X
-    else:
+    if not isinstance(adata.X, np.ndarray):
         data_array = adata.X.toarray()
-    
-    print(f"Subsetting to top {n_highly_variable} highly variable genes...")
-    # Subset adata to top n hvgs
-    hvgs = pd.DataFrame(data_array.transpose(), index=adata.var_names).apply(np.var, axis=1).sort_values().nlargest(n_highly_variable).index
+    else:
+        data_array = adata.X
+
+    # 1) Select HVGs
+    if n_highly_variable is None:
+        print("Subsetting to HVGs based on default cutoff thresholds...")
+        hvgs = seurat_hvg_custom(
+            adata,
+            n_top_genes=None,
+            min_disp=0.5,
+            max_disp=float('inf'),
+            min_mean=0.0125,
+            max_mean=4,
+            n_bins=20
+        )
+
+    else:
+        print(f"Subsetting to top HVGs using ranking...")
+        hvgs = seurat_hvg_custom(
+            adata,
+            n_top_genes=n_highly_variable,
+            min_disp=0.5,
+            max_disp=float('inf'),
+            min_mean=0.0125,
+            max_mean=4,
+            n_bins=20
+        )
+        
+    print(f"Number of HVGs retained for AutoGeneS: {len(hvgs)}")
+
+    # # Subset to HVGs
     adata = adata[:, hvgs]
     
-    # Define cell types
+
+    # If using fixed_n_features, ensure it does not exceed the number of available genes
+    if fixed_n_features is not None and fixed_n_features > adata.shape[1]:
+        raise ValueError(
+            f"fixed_n_features={fixed_n_features} exceeds number of HVGs "
+            f"({adata.shape[1]}). Please specify a smaller value."
+        )
+
+    # 2) Calculate cell-type centroids
+    print("\nCalculating centroids for each cell type...")
     celltypes = pd.unique(adata.obs[celltype_key])
     centroids_sc_hv = pd.DataFrame(index=adata.var_names, columns=celltypes)
-    
-    print("Calculating centroids for each cell type...")
-    # Calculate celltype centroids
+
     for celltype in celltypes:
-        print(f"Processing cell type: {celltype}")
-        adata_filtered = adata[adata.obs[celltype_key] == celltype]
-        sc_part = adata_filtered.X.T if isinstance(adata_filtered.X, np.ndarray) else adata_filtered.X.toarray().T
-        centroids_sc_hv[celltype] = pd.DataFrame(np.mean(sc_part, axis=1), index=adata.var_names)
-    
-    print("Initializing AutoGeneS optimization...")
-    # Run AutoGeneS
+        print(f"  Processing cell type: {celltype}")
+        mask = (adata.obs[celltype_key] == celltype)
+        adata_filtered = adata[mask]
+        
+        # Convert to dense if needed
+        sc_part = (
+            adata_filtered.X.T if isinstance(adata_filtered.X, np.ndarray)
+            else adata_filtered.X.toarray().T
+        )
+        centroids_sc_hv[celltype] = np.mean(sc_part, axis=1)
+
+    # 3) Run AutoGeneS
+    print("\nInitializing AutoGeneS optimization...")
     ag.init(centroids_sc_hv.T)
-    print("Running AutoGeneS optimization process. This may take some time...")
-    ag.optimize(ngen=5000, seed=0, offspring_size=100, verbose=False)
-    print("AutoGeneS optimization complete.")
+
+    if fixed_n_features is not None:
+        print(f"AutoGeneS running in fixed mode"
+              f"with output of {fixed_n_features} genes.")
+    else:
+        print(f"AutoGeneS running in default mode")
     
-    # Fetch AutoGeneS in list
+
+    print("Running AutoGeneS optimization process. This may take some time...")
+   
+    if fixed_n_features is not None:
+        # Fixed mode
+        ag.optimize(ngen=5000, nfeatures=fixed_n_features,  offspring_size=100,  seed=0, mode='fixed', verbose = False)
+    else:
+        # Default mode
+        ag.optimize(ngen=5000, seed=0,  offspring_size=100,  verbose=False)
+
+    print("AutoGeneS optimization complete.")
+
+    # 4) Retrieve the solution
     print("Fetching marker genes selected by AutoGeneS...")
-    AutoGenes = centroids_sc_hv[ag.select(index=0)].index.tolist()
+    top_solution_genes = ag.select(index=0)
+    AutoGenes = centroids_sc_hv[top_solution_genes].index.tolist()
     print("Marker genes successfully extracted.")
+
     return AutoGenes
+
