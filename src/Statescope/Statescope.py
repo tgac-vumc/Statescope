@@ -17,12 +17,13 @@ Statescope_model.StateDiscovery()
 """
 #
 # TODO:
-# 1) 
+# 1) Testing by Jurrian 
 #
 # History:
 #  13-12-2024: File creation, write code, test Deconvolution and Refinement
 #  14-12-2024: Finish StateDiscovery testing
 #  20-01-2025: Additional checks, Utility and Visualization Functions 
+#  30-04-2025: New parameters, critical functions fixed and tested
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 #-------------------------------------------------------------------------------
@@ -94,22 +95,38 @@ class Statescope:
         
         # Prepare Bulk (select/match genes)
         Y = self.Bulk.loc[self.Markers,self.Samples].to_numpy()
+        scExp_celltypes = [ct.replace("scExp_", "") for ct in self.scExp.columns]
+        scVar_celltypes = [ct.replace("scVar_", "") for ct in self.scVar.columns]
 
-        # Check validity of Expectation (prior fractions)
-        Check_Expectation_validity(Expectation)
+        Expectation = Check_Expectation_validity(
+            Expectation,
+            celltype_order=scExp_celltypes,
+            sample_names=self.Samples
+        )
+
         
         # Excecute BLADE Deconvolution: FrameWork iterative
         final_obj, best_obj, best_set, outs = Framework_Iterative(scExp_marker, scVar_marker, Y, Ind_Marker,
                         Alpha, Alpha0, Kappa0, sY,
                         Nrep, self.Ncores, fsel, Update_SigmaY, Init_Trust,
-                        Expectation, Temperature, IterMax)
+                        Expectation = Expectation, Temperature = Temperature, IterMax = IterMax)
         # Save BLADE result in Statescope object
         self.BLADE = final_obj
         # Save fractions as dataframe in object
-        self.Fractions = pd.DataFrame(final_obj.ExpF(final_obj.Beta), index = self.Samples,columns = self.Celltypes)
-        # Add bool
+        self.Fractions = pd.DataFrame(final_obj.ExpF(final_obj.Beta).cpu().numpy(), index=self.Samples, columns=self.Celltypes)
+
+        ###This one is for old oncoblade application 
+        #self.Fractions =  pd.DataFrame(final_obj.ExpF(final_obj.Beta), index=self.Samples, columns=self.Celltypes)
         self.isDeconvolutionDone = True
         print("Deconvolution completed successfully.")
+    
+        # Check convergence flag and print message accordingly
+        # Convert to a Python boolean if needed
+        if self.BLADE.log:
+            print("Model converged.")
+        else:
+            print("Warning: Model did not converge, estimates might not be optimal.")
+
 
         
     # Perform Gene Expression Refinement
@@ -147,8 +164,17 @@ class Statescope:
         print("Refinement completed successfully.")
 
 
-    def StateDiscovery(self, celltype=None, K=None, weighing='Omega', n_iter=10, n_final_iter=100, min_cophenetic=0.9, max_clusters=10):
-        """ 
+    def StateDiscovery(
+            self,
+            celltype: str | list[str] | None = None,
+            K: int | list[int] | dict[str, int] | None = None,
+            weighing: str = 'Omega',
+            n_iter: int = 10,
+            n_final_iter: int = 100,
+            min_cophenetic: float = 0.9,
+            max_clusters: int = 10):
+        """
+         
         Perform StateDiscovery from ctSpecificGEX using cNMF.
 
         :param celltype: List of cell types or a single cell type for which to perform state discovery.
@@ -160,49 +186,134 @@ class Statescope:
         :param n_final_iter: Number of final cNMF restarts.
         :param min_cophenetic: Minimum cophenetic coefficient to determine K.
         :param max_clusters: Maximum number of clusters/states to consider.
+        :param celltype : str | list[str] | None, optional
+        Cell types to analyse (default = all stored in the object).
+
+        :param K : int | list[int] | dict[str, int] | None, optional
+            • None   – each cell type gets an automatically chosen k  
+            • int    – the same k for every cell type (celltype filter ignored)  
+            • list   – one k per entry in `celltype` (same order)  
+            • dict   – give k for selected cell types; the rest are automatic
+
+        **Examples**
+
+        >>> Model.StateDiscovery(K=2)
+        Forces k = 2 for *every* cell type.
+
+        >>> Model.StateDiscovery(celltype='Monocyte')
+        Analyses only Monocytes; k picked automatically.
+
+        >>> Model.StateDiscovery(K={'Monocyte': 2})
+        Monocytes fixed at k = 2; every other cell type analysed with
+        automatic k.
+
+        >>> Model.StateDiscovery(celltype=['T', 'B'], K=[4, 5])
+        T cells get k = 4, B cells k = 5; no other cell types analysed.
+                
         """
+        # ------------------------------------------------------------ #
+        # 0) pre-flight checks                                         #
+        # ------------------------------------------------------------ #
         if not self.isRefinementDone:
-            raise Exception("Refinement must be completed before StateDiscovery.")
+            raise RuntimeError("Run Refinement before StateDiscovery.")
 
-        if celltype is None:
-            celltype = self.Celltypes  # Assume self.Celltypes is populated from initial data processing
-        if isinstance(celltype, str):
-            celltype = [celltype]  # Ensure celltype is iterable
+        all_celltypes = list(self.Celltypes)      # stored when the object was built
 
+        # ------------------------------------------------------------ #
+        # 1) normalise `celltype` argument                             #
+        # ------------------------------------------------------------ #
+        if isinstance(K, int):
+            # K is a single integer → analyse *all* cell types,
+            # ignoring any `celltype` argument the caller provided.
+            celltype_run = all_celltypes
+        else:
+            # otherwise use the caller's list, defaulting to all
+            if celltype is None:
+                celltype_run = all_celltypes
+            elif isinstance(celltype, str):
+                celltype_run = [celltype]
+            else:
+                celltype_run = list(celltype)
+
+            # if K is a dict, include those keys too
+            if isinstance(K, dict):
+                celltype_run = list(set(celltype_run) | set(K.keys()))
+
+        # ------------------------------------------------------------ #
+        # 2) build K-mapping {celltype: k or None}                     #
+        # ------------------------------------------------------------ #
         if K is None:
-            K = [None] * len(celltype)
+            Kmap = {ct: None for ct in celltype_run}
+
         elif isinstance(K, int):
-            K = [K] * len(celltype)  # Broadcast K if it's a single integer
+            Kmap = {ct: K for ct in celltype_run}
 
-        # Check for consistency in the length of lists if explicitly provided
-        if len(celltype) != len(K):
-            raise ValueError("Mismatch in the lengths of 'celltype' and 'K'.")
+        elif isinstance(K, list):
+            if len(K) != len(celltype_run):
+                raise ValueError("Length of K list must equal number of cell types.")
+            Kmap = dict(zip(celltype_run, K))
 
-        State_dict = {}
-        CopheneticCoefficients = {}
-        StateScores = pd.DataFrame()
-        StateLoadings = pd.DataFrame()
+        elif isinstance(K, dict):
+            Kmap = {ct: K.get(ct, None) for ct in celltype_run}
 
-        for ct, k in zip(celltype, K):
-            cNMF_model, cophcors =  StateDiscovery_FrameWork(self.GEX[ct], self.Omega[ct], self.Fractions, ct, weighing, k, n_iter, n_final_iter, min_cophenetic, max_clusters, self.Ncores)
-            CopheneticCoefficients[ct] = cophcors
-            State_dict[ct] = cNMF_model
-            StateScores = pd.concat([StateScores, pd.DataFrame(State_dict[ct].H.transpose(), index=self.Samples).add_prefix(ct+'_')], axis=1)
-            StateLoadings = pd.concat([StateLoadings, pd.DataFrame(State_dict[ct].W, index=self.Genes).add_prefix(ct+'_')], axis=1)
+        else:
+            raise TypeError("K must be int, list, dict, or None.")
 
-        self.cNMF = State_dict
+        # ------------------------------------------------------------ #
+        # 3) run cNMF / state discovery per cell type                  #
+        # ------------------------------------------------------------ #
+        State_dict, CopheneticCoefficients = {}, {}
+        StateScores, StateLoadings = pd.DataFrame(), pd.DataFrame()
+
+        for ct in celltype_run:
+            model, coph = StateDiscovery_FrameWork(
+                self.GEX[ct],
+                self.Omega[ct],
+                self.Fractions,
+                ct,
+                weighing,
+                Kmap[ct],                 # may be None → auto
+                n_iter,
+                n_final_iter,
+                min_cophenetic,
+                max_clusters,
+                self.Ncores,
+            )
+
+            State_dict[ct]             = model
+            CopheneticCoefficients[ct] = coph
+            StateScores = pd.concat(
+                [StateScores,
+                pd.DataFrame(model.H.T, index=self.Samples)
+                .add_prefix(f"{ct}_")],
+                axis=1
+            )
+            StateLoadings = pd.concat(
+                [StateLoadings,
+                pd.DataFrame(model.W, index=self.Genes)
+                .add_prefix(f"{ct}_")],
+                axis=1
+            )
+
+        # ------------------------------------------------------------ #
+        # 4) stash results in the object                               #
+        # ------------------------------------------------------------ #
+        self.cNMF                   = State_dict
         self.CopheneticCoefficients = CopheneticCoefficients
-        self.StateScores = StateScores
-        self.StateLoadings = StateLoadings
-        self.isStateDiscoveryDone = True
+        self.StateScores            = StateScores
+        self.StateLoadings          = StateLoadings
+        self.isStateDiscoveryDone   = True
+
         print("StateDiscovery completed successfully.")
+
+
 
 #-------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
 #-------------------------------------------------------------------------------
-def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10):
+def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10, fixed_n_features=None, drop_sigdiff = False):
     """ 
-    Initializes Statescope object with Bulk and (pre-defined) Signature.
+    Initializes Statescope object with Bulk and Signature.
 
     :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected counts are expected.
     :param pandas.DataFrame or ad.AnnData or None Signature: Cell type specific gene expression matrix.
@@ -210,18 +321,28 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
     :param str Ncelltypes: Number of cell types in the signature.
     :param list MarkerList: Predefined list of markers to use for deconvolution.
     :param str celltype_key: Key to use for cell type in AnnData.
-    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection.
+    :param int n_highly_variable: Number of hvgs to select for AutoGeneS marker detection, if set as None default cutoffs will be used
     :param int Ncores: Number of cores to use for parallel computing.
+    :param int fixed_n_features: None will allow autogenes to determine the number of genes, selecting for eg 500 will give 500 marker genes to be used for deconvolution
 
     :returns: Statescope object initialized with the given parameters.
     """
     available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
-
-    if Signature:
+  #subset Markers if supplied before creating signature 
+    if Signature is not None:
         if isinstance(Signature, pd.DataFrame):
             Check_Signature_validity(Signature)
         elif isinstance(Signature, ad.AnnData):
-            Signature = CreateSignature(Signature, celltype_key=celltype_key)
+             Signature = CreateSignature(
+                Signature,
+                celltype_key=celltype_key,
+                CorrectVariance=True,
+                n_highly_variable=n_highly_variable,
+                fixed_n_features=fixed_n_features,
+                MarkerList=MarkerList,
+                Bulk = Bulk,
+                drop_sigdiff= drop_sigdiff      # ← passed through
+            )
     else:
         if TumorType == '' or TumorType not in available_signatures:
             error_msg = "TumorType not specified or invalid. Available options include:\n"
@@ -239,6 +360,9 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
             error_msg += ', '.join(available_signatures[TumorType])
             raise ValueError(error_msg)
     
+    if MarkerList:
+        Signature['IsMarker'] = Signature.index.isin(MarkerList)
+
     # Continue with the initialization as before
     Samples = Bulk.columns.tolist()
     Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
@@ -248,8 +372,6 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
     Bulk = Bulk.loc[Genes, :]
     Bulk = Check_Bulk_Format(Bulk)
     Markers = Signature[Signature.IsMarker].index.tolist()
-    if MarkerList:
-        Markers = [gene for gene in Genes if gene in MarkerList]
 
     Omega_columns = ['scVar_' + ct for ct in Celltypes]
     Mu_columns = ['scExp_' + ct for ct in Celltypes]
@@ -385,7 +507,7 @@ def Check_Bulk_Format(Bulk):
         Bulk = Bulk.apply(lambda x: x / sum(x) * 10000, axis=0)
     elif (Bulk < 0).any().any():
         raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required.')
-
+ 
     return Bulk
 
 # Function to check if custom Signature is valid
@@ -394,15 +516,56 @@ def Check_Signature_validity(Signature):
         if not 'IsMarker' in Signature.columns:
             raise AssertionError('IsMarker column is missing in Signature')
 
-# Function to check if Expectation (prior knowledge of fractions) is valid
-def Check_Expectation_validity(Expectation):
-    if Expectation == None:
+
+
+def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=None):
+    if Expectation is None:
         print('No prior knowledge of expected cell type fractions is given.')
+        return None
+
+    if isinstance(Expectation, dict):
+        group_mat = Expectation.get("Group")
+        group_expect = Expectation.get("Expectation")
+
+        if group_mat is None or group_expect is None:
+            raise ValueError("Both 'Group' and 'Expectation' must be keys in the dictionary.")
+
+        if not isinstance(group_mat, np.ndarray) or not isinstance(group_expect, np.ndarray):
+            raise ValueError("Group and Expectation must be numpy arrays in the dictionary format.")
+
+        if group_expect.shape[1] != group_mat.shape[0]:
+            raise ValueError(f"Shape mismatch: Expectation has {group_expect.shape[1]} groups, "
+                             f"but Group matrix has {group_mat.shape[0]} rows.")
+
+        temp = np.matmul(group_expect, group_mat)
+
+        if (temp == 0).any():
+            raise ValueError("The Expectation contains 0 which is not allowed. Use a small value like 0.01.")
+
+        if (temp == 1).any():
+            raise ValueError("The Expectation contains 1 which is not allowed. Use a large value like 0.99.")
+
+        print("Grouped prior knowledge is utilised in refining fraction estimates.")
+        return Expectation  
+
+    elif isinstance(Expectation, pd.DataFrame):
+        if celltype_order is not None:
+            missing_cts = [ct for ct in celltype_order if ct not in Expectation.columns]
+            if missing_cts:
+                raise ValueError(f"Missing cell types in Expectation: {missing_cts}")
+            Expectation = Expectation[celltype_order]
+
+        if (Expectation == 0).any().any():
+            raise ValueError("The Expectation contains 0 which is not allowed. Use a small value like 0.01.")
+
+        if (Expectation == 1).any().any():
+            raise ValueError("The Expectation contains 1 which is not allowed. Use a large value like 0.99.")
+
+        print("Celltype-level prior knowledge is utilised in refining fraction estimates.")
+        return Expectation
+
     else:
-        if (Expectation == 0).any():
-            raise ValueError('The Expectation contains 0 which is not allowed. Consider giving a very small value (0.01)')
-        if (Expectation == 1).any():
-            raise ValueError('The Expectation contains 1 which is not allowed. Consider giving a very large value (0.99)')
+        raise ValueError("Expectation must be a dict or a pandas DataFrame.")
 
         
 def fetch_signature(tumor_type, n_celltypes):
@@ -563,70 +726,107 @@ def Heatmap_GEX(Statescope_model, celltype):
     plt.show()
 
 
-def Heatmap_StateScores(Statescope_model):
+def Heatmap_StateScores(
+        Statescope_model,
+        *,
+        col_width: float = 0.35,     # inch per state column
+        row_height: float = 0.35,    # inch per sample row
+        bottom: float = 0.28,        # extra margin for x-labels (0-1)
+        label_pad: int = 40):        # gap between heat-map and x-labels
     """
-    Visualize the state scores matrix as a heatmap with states aligned with their respective cell types.
+    Heat-map of state scores with auto-scaled figure size so column labels and
+    state numbers never overlap.
+
+    Parameters
+    ----------
+    Statescope_model : Statescope
+        Object returned by StateDiscovery.
+    col_width : float, optional
+        Desired width (inches) allotted to **each state column**.
+    row_height : float, optional
+        Desired height (inches) allotted to **each sample row**.
+    bottom : float, optional
+        Fraction of figure height reserved beneath the heat-map for x-labels.
+    label_pad : int, optional
+        Padding (points) between heat-map edge and x-labels.
     """
-    # Extract the state scores
+    # ------------------------------------------------------------ #
+    # 1) data                                                      #
+    # ------------------------------------------------------------ #
     state_scores = Extract_StateScores(Statescope_model)
 
-    # Generate color map for columns
-    color_map = generate_color_map(state_scores.columns)
-
-    # Separate cell types and states for labels
     cell_states = state_scores.columns
-    cell_types = ['_'.join(col.split('_')[:-1]) for col in cell_states]  # Full cell type names
-    state_numbers = [col.split('_')[-1] for col in cell_states]
+    cell_types  = ['_'.join(c.split('_')[:-1]) for c in cell_states]
+    state_nums  = [c.split('_')[-1]            for c in cell_states]
 
-    # Create a heatmap
-    plt.figure(figsize=(16, 12))
+    # ------------------------------------------------------------ #
+    # 2) dynamic figure size                                       #
+    # ------------------------------------------------------------ #
+    n_cols = state_scores.shape[1]
+    n_rows = state_scores.shape[0]
+    fig_w  = max(8, col_width  * n_cols)      # at least 8 inch wide
+    fig_h  = max(6, row_height * n_rows)      # at least 6 inch tall
+    plt.figure(figsize=(fig_w, fig_h))
+
+    # ------------------------------------------------------------ #
+    # 3) base heat-map                                             #
+    # ------------------------------------------------------------ #
     sns.heatmap(
         state_scores,
         cmap="coolwarm",
         cbar_kws={"label": "State Scores"},
-        xticklabels=False,  # Turn off default x-tick labels
+        xticklabels=False,
         yticklabels=True,
         linewidths=0.5
     )
-
-    # Access the axes
     ax = plt.gca()
 
-    # Add state numbers directly on top of color blocks
-    for x, state in enumerate(state_numbers):
-        color = color_map[state_scores.columns[x]]  # Get the color for the current state
+    # annotate state numbers
+    palette = generate_color_map(cell_states)
+    for x, num in enumerate(state_nums):
         ax.text(
-            x + 0.5, len(state_scores) + 0.5,  # Position above the heatmap
-            state, fontsize=8, ha='center', va='center', color='black',
-            bbox=dict(facecolor=color, edgecolor='none', boxstyle='round,pad=0.3', alpha=0.8)
+            x + 0.5, n_rows + 0.5,
+            num,
+            ha='center',
+            va='center',
+            fontsize=8,
+            bbox=dict(facecolor=palette[cell_states[x]], edgecolor='none',
+                      boxstyle='round,pad=0.3', alpha=0.8)
         )
 
-    # Group cell types and display each name once
-    xticks = []
-    xticklabels = []
-    prev_cell_type = None
-    for idx, (col, cell_type) in enumerate(zip(cell_states, cell_types)):
-        if cell_type != prev_cell_type:
+    # x-tick labels: one per cell type
+    xticks, labels, prev = [], [], None
+    for idx, ctype in enumerate(cell_types):
+        if ctype != prev:
             xticks.append(idx + 0.5)
-            xticklabels.append(cell_type)
-            prev_cell_type = cell_type
+            labels.append(ctype)
+            prev = ctype
 
-    # Set x-axis ticks and labels
     ax.set_xticks(xticks)
-    ax.set_xticklabels(xticklabels, fontsize=10, rotation=90, ha='center')
-    ax.tick_params(axis='x', pad=25)  # Adjust the padding to push tick labels further down
+    ax.set_xticklabels(labels, rotation=90, ha='center', va='top', fontsize=10)
+    ax.tick_params(axis='x', pad=label_pad)
+    plt.gcf().subplots_adjust(bottom=bottom)   # reserve space for labels
 
-    # Remove the x-axis title
     ax.set_xlabel("")
-
-    # Set the title
     ax.set_title("State Scores Heatmap", fontsize=14)
-    plt.tight_layout()
     plt.show()
+
+
 
 def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     """
-    Visualize the state loadings matrix as a heatmap with states aligned with their respective cell types.
+    Plot the cell-type state-loading matrix as a heat-map.
+    Columns (states) are grouped by cell type and labelled with the state
+    number on the colour bar; rows are genes.  Optionally restrict the plot to
+    the genes with the largest absolute loadings.
+
+    :param Statescope_model:  A fitted Statescope object; must contain the
+                              ``StateLoadings`` matrix produced by
+                              *StateDiscovery*.
+    :param top_genes:         If *None* (default) plot all genes.  
+                              If an int *N*, plot only the *N* genes with the
+                              highest absolute loading across all states
+                              (one global ranking).
     """
     # Extract the state loadings
     state_loadings = Extract_StateLoadings(Statescope_model)
@@ -697,30 +897,79 @@ def Plot_CopheneticCoefficients(Statescope_model):
 
     :param Statescope_model: The Statescope object containing CopheneticCoefficients.
     """
-    if not hasattr(Statescope_model, 'CopheneticCoefficients') or Statescope_model.CopheneticCoefficients is None:
-        raise AttributeError("CopheneticCoefficients are not available. Please ensure that StateDiscovery has been completed.")
+    # ------------------------------------------------------------ #
+    # 0) sanity check                                              #
+    # ------------------------------------------------------------ #
+    if not getattr(Statescope_model, "CopheneticCoefficients", None):
+        raise AttributeError(
+            "CopheneticCoefficients are not available. "
+            "Run StateDiscovery first."
+        )
 
-    Plot_data = pd.DataFrame(Statescope_model.CopheneticCoefficients)
-    # Fetch k
-    Plot_data['k'] = range(2,Plot_data.shape[0]+2)
-    # Create long format
-    Plot_data = pd.melt(Plot_data, id_vars = 'k',var_name = 'celltype', value_name = 'Cophenetic Coefficient')
-    # Fetch chosen models
-    Chosen_models = {ct: sum(ct in col for col in Statescope_model.StateScores.columns) for ct in Plot_data.celltype.unique()}
-    annotation_list = []
-    for k, ct in zip(Plot_data['k'],Plot_data['celltype']):
-        if Chosen_models[ct] == k:
-            annotation_list.append('Chosen')
+    # number of states retained for each cell type, derived from StateScores
+    chosen_K = {
+        ct: sum(col.startswith(f"{ct}_") for col in Statescope_model.StateScores.columns)
+        for ct in Statescope_model.CopheneticCoefficients.keys()
+    }
+
+    # ------------------------------------------------------------ #
+    # 1) build a tidy data-frame: celltype | k | coefficient | flag #
+    # ------------------------------------------------------------ #
+    records = []
+
+    for ct, coeff_obj in Statescope_model.CopheneticCoefficients.items():
+
+        # case A: array-like (list / np.ndarray / pd.Series)
+        if isinstance(coeff_obj, (list, np.ndarray, pd.Series)):
+            ks = np.arange(2, 2 + len(coeff_obj))
+            coeffs = coeff_obj
+
+        # case B: dict {k: coefficient}
+        elif isinstance(coeff_obj, dict):
+            ks, coeffs = zip(*sorted(coeff_obj.items()))
+
+        # case C: single scalar → only the chosen K’s coefficient is known
         else:
-            annotation_list.append('Not Chosen')
-    Plot_data['Chosen model'] = annotation_list
-    
-    
-    
-    # Create plot
-    plot = sns.FacetGrid(Plot_data, col="celltype")
-    plot.map(sns.lineplot, "k",'Cophenetic Coefficient', color = 'black')
-    plot.map(sns.scatterplot, "k",'Cophenetic Coefficient', 'Chosen model',palette={'Chosen':"red", 'Not Chosen':"black"})
+            ks = [chosen_K[ct]]
+            coeffs = [coeff_obj]
+
+        # add rows
+        for k, coef in zip(ks, coeffs):
+            records.append(
+                dict(celltype=ct,
+                     k=int(k),
+                     coefficient=coef,
+                     chosen=("Chosen" if k == chosen_K[ct] else "Not Chosen"))
+            )
+
+    plot_df = pd.DataFrame.from_records(records)
+
+    # ------------------------------------------------------------ #
+    # 2) plot with Seaborn                                         #
+    # ------------------------------------------------------------ #
+    g = sns.FacetGrid(plot_df, col="celltype", sharey=False, height=4, aspect=1.2)
+
+    # lines (only appear when ≥2 points for that cell type)
+    g.map_dataframe(
+        sns.lineplot,
+        x="k",
+        y="coefficient",
+        color="black"
+    )
+
+    # scatter: red = chosen, black = not chosen
+    g.map_dataframe(
+        sns.scatterplot,
+        x="k",
+        y="coefficient",
+        hue="chosen",
+        palette={"Chosen": "red", "Not Chosen": "black"},
+        legend=False,
+        s=50
+    )
+
+    g.set_axis_labels("k (number of states)", "Cophenetic coefficient")
+    g.fig.tight_layout()
     plt.show()
     
     
@@ -798,160 +1047,243 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
     plt.show()
 
 
-def TSNE_AllStates(Statescope_model, weighing='Omega', perplexity=5, n_iter=1000, point_size=80):
+
+
+def TSNE_AllStates(
+        Statescope_model,
+        *,
+        weighing: str = "Omega",
+        perplexity: int = 5,
+        n_iter: int = 1_000,
+        point_size: int = 80,
+        trim_regex: str = r"[_\|].*$",
+        random_state: int = 42,
+        show_samples: bool | None = None,   # ← NEW
+        sample_fs: int = 6):               # ← font-size when shown
     """
-    Create a t-SNE plot for visualizing all cell types and states using scaled data.
+    Run a t-SNE on all samples, colour by cell type, print the dominant state
+    number inside each dot.  Sample names are printed above the dots only when
+    *show_samples=True*.
 
-    :param Statescope_model: The Statescope object containing Fractions, GEX, Omega, and StateScores.
-    :param weighing: The weighing method for scaling ('Omega', 'OmegaFractions', 'centering', or 'no_weighing').
-    :param perplexity: t-SNE perplexity parameter.
-    :param n_iter: Number of iterations for optimization.
-    :param point_size: Size of the points in the scatter plot.
+    :param Statescope_model: The fitted Statescope object.
+    :param weighing:         Scaling used in ``Create_Cluster_Matrix``.
+    :param perplexity:       t-SNE perplexity (auto-capped).
+    :param n_iter:           Optimisation iterations for t-SNE.
+    :param point_size:       Marker size.
+    :param trim_regex:       Regex to shorten sample names when shown.
+    :param random_state:     Seed for reproducibility.
+    :param show_samples:     • None/False (default) → hide sample names.  
+                             • True → show sample names above each dot.
+    :param sample_fs:        Font size for sample names.
     """
-    # Extract necessary data
-    Fractions = Statescope_model.Fractions  # Cell type fractions
-    GEX_all = Statescope_model.GEX          # Purified gene expression
-    Omega_all = Statescope_model.Omega      # Gene expression variability
-    StateScores = Statescope_model.StateScores  # State scores
+    
+    Fractions   = Statescope_model.Fractions
+    GEX_all     = Statescope_model.GEX
+    Omega_all   = Statescope_model.Omega
+    StateScores = Statescope_model.StateScores
 
-    # Prepare data for t-SNE
-    all_scaled_data = []
-    all_labels = []
-    all_states = []
+    matrices, labels, states, samples = [], [], [], []
 
-    for celltype, Omega in Omega_all.items():
-        if celltype not in GEX_all:
-            print(f"Warning: Gene expression data for {celltype} not found. Skipping.")
+    # ------------------------------------------------------------------ #
+    # 1) build per-cell-type matrices + label lists                      #
+    # ------------------------------------------------------------------ #
+    for ct, Omega in Omega_all.items():
+        if ct not in GEX_all:
+            print(f"[t-SNE] '{ct}' GEX missing – skipped.")
             continue
 
-        GEX = GEX_all[celltype]
+        X = Create_Cluster_Matrix(GEX_all[ct], Omega, Fractions, ct, weighing)
+        X = np.nan_to_num(X)                         # remove NaN / inf
+        X = X[:, X.var(axis=0) > 0]                 # keep informative cols
 
-        # Create scaled data for this cell type
-        scaled_data = Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing)
-        all_scaled_data.append(scaled_data)
+        # guarantee ≥2 columns
+        if X.shape[1] == 0:
+            X = np.zeros((X.shape[0], 2))
+        elif X.shape[1] == 1:
+            X = np.hstack([X, np.zeros((X.shape[0], 1))])
 
-        # Label each row with the cell type
-        all_labels.extend([celltype] * scaled_data.shape[0])
+        matrices.append(X)
+        labels.extend([ct] * X.shape[0])
 
-        # Extract dominant state numbers
-        scores = StateScores[[col for col in StateScores.columns if col.startswith(celltype)]]
-        dominant_states = scores.idxmax(axis=1).str.split('_').str[-1].astype(int)  # Extract state numbers
-        all_states.extend(dominant_states)
+        dom_state = (StateScores.filter(regex=f"^{ct}_")
+                                  .idxmax(axis=1)
+                                  .str.split('_').str[-1].astype(int))
+        states.extend(dom_state)
 
-    # Combine all scaled data
-    combined_data = np.vstack(all_scaled_data)
+        trimmed_samples = (dom_state.index
+                           .to_series()
+                           .str.replace(trim_regex, "", regex=True))
+        samples.extend(trimmed_samples)
 
-    # Perform t-SNE
-    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=n_iter)
-    tsne_results = tsne.fit_transform(combined_data)
+    if not matrices:
+        print("[t-SNE] No usable data.")
+        return
 
-    # Create a DataFrame for t-SNE results
-    tsne_df = pd.DataFrame(tsne_results, columns=['t-SNE1', 't-SNE2'])
-    tsne_df['Cell Type'] = all_labels
-    tsne_df['State Number'] = all_states
+    # ------------------------------------------------------------------ #
+    # 2) pad matrices to equal n_columns, stack                          #
+    # ------------------------------------------------------------------ #
+    max_cols = max(m.shape[1] for m in matrices)
+    padded   = [np.pad(m, ((0, 0), (0, max_cols - m.shape[1])),
+                       mode="constant") for m in matrices]
+    combined = np.vstack(padded)
 
-    # Generate a color map for cell types
-    unique_cell_types = tsne_df['Cell Type'].unique()
-    color_map = {cell_type: color for cell_type, color in zip(unique_cell_types, sns.color_palette("husl", len(unique_cell_types)))}
+    # ------------------------------------------------------------------ #
+    # 3) run t-SNE                                                      #
+    # ------------------------------------------------------------------ #
+    perp = max(1, min(perplexity, combined.shape[0] - 1))
+    tsne = TSNE(n_components=2, init="random",
+                perplexity=perp, n_iter=n_iter,
+                random_state=random_state)
+    emb = tsne.fit_transform(combined)
 
-    # Plot t-SNE
-    plt.figure(figsize=(14, 10))
-    for cell_type in unique_cell_types:
-        cell_type_df = tsne_df[tsne_df['Cell Type'] == cell_type]
-        plt.scatter(
-            cell_type_df['t-SNE1'],
-            cell_type_df['t-SNE2'],
-            label=cell_type,
-            c=[color_map[cell_type]] * len(cell_type_df),
-            s=point_size,  # Adjust point size
-            alpha=0.7,
-            edgecolor='k'
-        )
+    df = pd.DataFrame(emb, columns=["t-SNE1", "t-SNE2"])
+    df["Cell"]   = labels
+    df["State"]  = states
+    df["Sample"] = samples
 
-    # Add state numbers as labels on the points
-    for i in range(len(tsne_df)):
-        plt.text(tsne_df['t-SNE1'][i], tsne_df['t-SNE2'][i], tsne_df['State Number'][i],
-                 fontsize=6, alpha=0.8, ha='center')
+    # 4) plot ------------------------------------------------------------
+    palette   = sns.color_palette("husl", df["Cell"].nunique())
+    ct_colour = dict(zip(df["Cell"].unique(), palette))
 
-    # Add plot details
-    plt.legend(title='Cell Types', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.title("t-SNE of All Cell Types and States", fontsize=16)
-    plt.xlabel("t-SNE1")
-    plt.ylabel("t-SNE2")
+    plt.figure(figsize=(12, 9))
+    for ct, sub in df.groupby("Cell"):
+        plt.scatter(sub["t-SNE1"], sub["t-SNE2"],
+                    c=[ct_colour[ct]] * len(sub),
+                    s=point_size, alpha=0.7, edgecolor="k",
+                    label=ct)
+
+    # state number (always)
+    for _, row in df.iterrows():
+        plt.text(row["t-SNE1"], row["t-SNE2"],
+                 str(row["State"]), fontsize=6,
+                 ha="center", va="center", color="white")
+
+    # sample name (optional)
+    if show_samples:
+        for _, row in df.iterrows():
+            plt.text(row["t-SNE1"], row["t-SNE2"] + 0.8,
+                     row["Sample"], fontsize=sample_fs,
+                     ha="center", va="bottom", alpha=0.9)
+
+    plt.legend(title="Cell Type", bbox_to_anchor=(1.04, 1), loc="upper left")
+    plt.title("t-SNE of All Cell Types / States", fontsize=15)
+    plt.xlabel("t-SNE1"); plt.ylabel("t-SNE2")
     plt.tight_layout()
     plt.show()
 
-def TSNE_CellTypes(Statescope_model, celltype=None, weighing='Omega', perplexity=5, n_iter=1000, point_size=150):
-    """
-    Create t-SNE plots for a single cell type or for all cell types, displayed individually.
 
-    :param Statescope_model: The Statescope object containing Fractions, GEX, Omega, and StateScores.
-    :param celltype: The specific cell type to visualize (default: None, meaning all cell types).
-    :param weighing: The weighing method for scaling ('Omega', 'OmegaFractions', 'centering', or 'no_weighing').
-    :param perplexity: t-SNE perplexity parameter.
-    :param n_iter: Number of iterations for optimization.
-    :param point_size: Size of the points in the scatter plot.
+
+def TSNE_CellTypes(
+        Statescope_model,
+        celltype: str | None = None,
+        weighing: str = "Omega",
+        perplexity: int = 5,
+        n_iter: int = 1_000,
+        point_size: int = 150,
+        min_samples: int = 2,
+        random_state: int = 42,
+        *,
+        show_samples: bool = True,
+        sample_fs: int = 6):
     """
-    Omega_all = Statescope_model.Omega
-    GEX_all = Statescope_model.GEX
+    Generate a t-SNE scatterplot for one cell type (or every cell type) using
+    its “cluster matrix”.  
+    Each dot is a sample; the dominant state number is printed in the centre
+    and, if desired, the sample name is shown just above it.
+
+    :param Statescope_model:  A fitted Statescope object containing ``GEX``,
+                              ``Omega``, ``Fractions`` and ``StateScores``.
+    :param celltype:          A specific cell type to visualise.  
+                              • ``None`` (default) → plot every cell type.  
+                              • *str* → plot only the requested cell type.
+    :param weighing:          Transformation applied inside
+                              ``Create_Cluster_Matrix``  
+                              (``'Omega'`` | ``'OmegaFractions'`` |
+                              ``'centering'`` | ``'no_weighing'``).
+    :param perplexity:        t-SNE perplexity (auto-capped at
+                              *n_samples – 1*).
+    :param n_iter:            Number of optimisation iterations for t-SNE
+                              (default = 1000).
+    :param point_size:        Size of the scatter markers.
+    :param min_samples:       Minimum samples required for a cell type to be
+                              plotted; smaller groups are skipped.
+    :param random_state:      Seed for reproducible t-SNE initialisation.
+    :param show_samples:      ``True`` prints sample names above the dots;
+                              ``False`` omits them.
+    :param sample_fs:         Font-size for sample labels when
+                              ``show_samples=True``.
+    """
+    # ── shortcuts ─────────────────────────────────────────────────────
+    Omega_all   = Statescope_model.Omega
+    GEX_all     = Statescope_model.GEX
+    Fractions   = Statescope_model.Fractions
     StateScores = Statescope_model.StateScores
-    Fractions = Statescope_model.Fractions
 
-    # Generate consistent colors for all cell types
-    unique_cell_types = Omega_all.keys()
-    color_map = {cell_type: color for cell_type, color in zip(unique_cell_types, sns.color_palette("husl", len(unique_cell_types)))}
+    all_cts  = list(Omega_all.keys())
+    colors   = sns.color_palette("husl", len(all_cts))
+    ct_color = dict(zip(all_cts, colors))
 
-    # Determine which cell types to process
-    celltypes_to_plot = [celltype] if celltype else list(Omega_all.keys())
+    to_plot = [celltype] if celltype else all_cts
 
-    # Loop through each cell type and generate t-SNE
-    for celltype in celltypes_to_plot:
-        if celltype not in GEX_all or celltype not in Omega_all:
-            print(f"Data for cell type {celltype} not found. Skipping.")
+    for ct in to_plot:
+        if ct not in GEX_all or ct not in Omega_all:
+            print(f"[t-SNE] '{ct}' not found – skipped.")
             continue
 
-        GEX = GEX_all[celltype]
-        Omega = Omega_all[celltype]
+        # ── build + clean matrix ──────────────────────────────────────
+        mat = Create_Cluster_Matrix(GEX_all[ct], Omega_all[ct],
+                                    Fractions, ct, weighing)
+        mat = np.nan_to_num(mat)
 
-        # Create scaled data for this cell type
-        scaled_data = Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing)
+        var_mask = mat.var(axis=0) > 0
+        mat = mat[:, var_mask]
 
-        # Extract dominant state numbers
-        scores = StateScores[[col for col in StateScores.columns if col.startswith(celltype)]]
-        dominant_states = scores.idxmax(axis=1).str.split('_').str[-1].astype(int)
+        if mat.shape[0] < min_samples:
+            print(f"[t-SNE] '{ct}' has <{min_samples} samples – skipped.")
+            continue
 
-        # Perform t-SNE
-        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, n_iter=n_iter)
-        tsne_results = tsne.fit_transform(scaled_data)
+        if mat.shape[1] == 0:
+            mat = np.zeros((mat.shape[0], 2))
+        elif mat.shape[1] == 1:
+            mat = np.hstack([mat, np.zeros((mat.shape[0], 1))])
 
-        # Create a DataFrame for t-SNE results
-        tsne_df = pd.DataFrame(tsne_results, columns=['t-SNE1', 't-SNE2'])
-        tsne_df['State Number'] = dominant_states.reset_index(drop=True)
+        # ── labels ────────────────────────────────────────────────────
+        dom_state = (StateScores.filter(regex=f"^{ct}_")
+                                .idxmax(axis=1)
+                                .str.split('_').str[-1]
+                                .astype(int)
+                                .reset_index(drop=True))
+        sample_names = StateScores.index.to_series().reset_index(drop=True)
 
-        # Plot t-SNE
-        plt.figure(figsize=(10, 8))
-        plt.scatter(
-            tsne_df['t-SNE1'],
-            tsne_df['t-SNE2'],
-            label=celltype,
-            c=[color_map[celltype]] * len(tsne_df),
-            s=point_size,
-            alpha=0.7,
-            edgecolor='k'
-        )
+        # ── t-SNE ─────────────────────────────────────────────────────
+        perp = max(1, min(perplexity, mat.shape[0] - 1))
+        tsne = TSNE(n_components=2, init="random",
+                    perplexity=perp, n_iter=n_iter,
+                    random_state=random_state)
+        emb = tsne.fit_transform(mat)
 
-        # Add state numbers as labels on the points
-        for i in range(len(tsne_df)):
-            plt.text(tsne_df['t-SNE1'][i], tsne_df['t-SNE2'][i], str(tsne_df['State Number'][i]),
-                     fontsize=6, alpha=0.8, ha='center')
+        df = pd.DataFrame(emb, columns=["t-SNE1", "t-SNE2"])
+        df["state"]  = dom_state
+        df["sample"] = sample_names
 
-        # Add plot details
-        plt.legend(title='Cell Type', loc='upper left')
-        plt.title(f"t-SNE for {celltype} and States", fontsize=16)
-        plt.xlabel("t-SNE1")
-        plt.ylabel("t-SNE2")
+        # ── plot ─────────────────────────────────────────────────────
+        plt.figure(figsize=(8, 7))
+        plt.scatter(df["t-SNE1"], df["t-SNE2"],
+                    c=[ct_color[ct]] * len(df),
+                    s=point_size, alpha=0.7, edgecolor="k")
+
+        # state number centred
+        for x, y, s in zip(df["t-SNE1"], df["t-SNE2"], df["state"]):
+            plt.text(x, y, str(s), fontsize=6,
+                     ha='center', va='center', color='white')
+
+        # sample label a bit above
+        if show_samples:
+            for x, y, smp in zip(df["t-SNE1"], df["t-SNE2"], df["sample"]):
+                plt.text(x, y + 0.8, smp, fontsize=sample_fs,
+                         ha='center', va='bottom', alpha=0.9)
+
+        plt.title(f"t-SNE for {ct}", fontsize=14)
+        plt.xlabel("t-SNE1"); plt.ylabel("t-SNE2")
         plt.tight_layout()
         plt.show()
-
-
-
