@@ -211,17 +211,17 @@ class Statescope:
         T cells get k = 4, B cells k = 5; no other cell types analysed.
                 
         """
-        # ------------------------------------------------------------ #
-        # 0) pre-flight checks                                         #
-        # ------------------------------------------------------------ #
+        
+        # 0) checks                                         
+        
         if not self.isRefinementDone:
             raise RuntimeError("Run Refinement before StateDiscovery.")
 
         all_celltypes = list(self.Celltypes)      # stored when the object was built
 
-        # ------------------------------------------------------------ #
-        # 1) normalise `celltype` argument                             #
-        # ------------------------------------------------------------ #
+        
+        # 1) normalise `celltype` argument                             
+        
         if isinstance(K, int):
             # K is a single integer → analyse *all* cell types,
             # ignoring any `celltype` argument the caller provided.
@@ -239,9 +239,9 @@ class Statescope:
             if isinstance(K, dict):
                 celltype_run = list(set(celltype_run) | set(K.keys()))
 
-        # ------------------------------------------------------------ #
-        # 2) build K-mapping {celltype: k or None}                     #
-        # ------------------------------------------------------------ #
+        
+        # 2) build K-mapping {celltype: k or None}                     
+       
         if K is None:
             Kmap = {ct: None for ct in celltype_run}
 
@@ -259,9 +259,9 @@ class Statescope:
         else:
             raise TypeError("K must be int, list, dict, or None.")
 
-        # ------------------------------------------------------------ #
-        # 3) run cNMF / state discovery per cell type                  #
-        # ------------------------------------------------------------ #
+        
+        # 3) run cNMF / state discovery per cell type                
+        
         State_dict, CopheneticCoefficients = {}, {}
         StateScores, StateLoadings = pd.DataFrame(), pd.DataFrame()
 
@@ -295,9 +295,9 @@ class Statescope:
                 axis=1
             )
 
-        # ------------------------------------------------------------ #
-        # 4) stash results in the object                               #
-        # ------------------------------------------------------------ #
+        
+        # 4) stash results in the object                               
+        
         self.cNMF                   = State_dict
         self.CopheneticCoefficients = CopheneticCoefficients
         self.StateScores            = StateScores
@@ -337,12 +337,12 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
                 Signature,
                 celltype_key=celltype_key,
                 CorrectVariance=True,
-                n_highly_variable=n_highly_variable,
-                fixed_n_features=fixed_n_features,
-                MarkerList=MarkerList,
+                n_highly_variable=n_highly_variable, #hvg genes for autogenes parameter
+                fixed_n_features=fixed_n_features, # autogene number of genes paramter 
+                MarkerList=MarkerList,          #will use marker list instead of autogenes 
                 Bulk = Bulk,
-                drop_sigdiff= drop_sigdiff      # ← passed through
-            )
+                drop_sigdiff= drop_sigdiff)      # if bulk and drop_sigdiff are true will calculate the and remove genes that differ significantly in expression between the two datasets
+            
     else:
         if TumorType == '' or TumorType not in available_signatures:
             error_msg = "TumorType not specified or invalid. Available options include:\n"
