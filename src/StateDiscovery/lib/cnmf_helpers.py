@@ -60,6 +60,15 @@ def cNMF(data,k,nrun,ncores,niter=1000):
     model = models[objective.index(min(objective))]
     return model, cophcor, consensus_matrix
 
+
+def cNMF_Retrieval(data,StateLoadings,niter=1000):
+    k = StateLoadings.shape[1]    
+    model = cnmf.CNMF(np.transpose(data), num_bases=k, niter=niter)
+    model.W = StateLoadings.to_numpy()
+    model.factorize(niter=niter, compute_w=False)
+    return model
+
+
 def find_threshold(cophcors,ks,min_cophenetic=0.95):
     cross = [False, False] + [((cophcors[i] < min_cophenetic) & (cophcors[i-1] >= min_cophenetic) & (cophcors[i-2] >= min_cophenetic)) for i in range(2,len(cophcors))]
     if any(cross) == False:

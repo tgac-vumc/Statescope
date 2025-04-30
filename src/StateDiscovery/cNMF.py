@@ -62,6 +62,16 @@ def StateDiscovery_FrameWork(GEX,Omega,Fractions,celltype,weighing = 'Omega',K=N
     cNMF_model, cophcors, consensus_matrix = cNMF(data_scaled, nclust, n_final_iter, Ncores)
     return cNMF_model, cophcors
 
+# StateRetrieveal: Calculate state scores with predefined state loadings
+def StateRetrieval(GEX,Omega,Fractions,celltype,StateLoadings,weighing = 'Omega'):
+    # Find overlapping genes and subset
+    Genes = [gene for gene in data.columns if gene in StateLoadings.index]
+    data_scaled = Create_Cluster_Matrix(GEX.loc[:,Genes],Omega[Genes,:],Fractions,celltype,weighing)
+    StateLoadings = StateLoadings.loc[Genes,:]
+    # Run cNMF recovery
+    cNMF_model = cNMF_Retrieval(data_scaled,StateLoadings)
+    return cNMF_model
+
                 
     
 
