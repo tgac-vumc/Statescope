@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Statescope"
-version = "0.2.0"
+version = "0.3.1"
 description = "Statescope framework to uncover cell states from bulk RNA-seq and DNA-seq data"
 readme = "README.md"
 authors = [

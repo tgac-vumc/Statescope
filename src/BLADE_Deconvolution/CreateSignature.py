@@ -98,15 +98,13 @@ def looks_logged(adata, max_cutoff=50, int_tolerance=0.99):
         return False          # definitely raw
 
     # 2) integer-ness heuristic
-    frac_part = np.abs(X - np.rint(X))
+    # fetch non_zero X
+    X_non_zero = X[X != 0]
+    frac_part = np.abs(X_non_zero - np.rint(X_non_zero))
     if (frac_part < 1e-10).mean() > int_tolerance:
         return False          # almost all integers → raw
 
-    # 3) raw layer present?
-    if getattr(adata, "raw", None) is not None:
-        return True           # Scanpy default after log1p
-
-    # 4) total-count correlation
+    # 3) total-count correlation
     totals = X.sum(axis=1)
     means  = X.mean(axis=1)
     rho    = np.corrcoef(totals, means)[0, 1]
