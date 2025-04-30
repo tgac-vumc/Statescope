@@ -284,7 +284,7 @@ class Statescope:
             CopheneticCoefficients[ct] = coph
             StateScores = pd.concat(
                 [StateScores,
-                pd.DataFrame(model.H.T, index=self.Samples)
+                pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
                 .add_prefix(f"{ct}_")],
                 axis=1
             )
