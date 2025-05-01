@@ -562,7 +562,7 @@ def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=No
             raise ValueError("The Expectation contains 1 which is not allowed. Use a large value like 0.99.")
 
         print("Celltype-level prior knowledge is utilised in refining fraction estimates.")
-        return Expectation
+        return Expectation.to_numpy()
 
     else:
         raise ValueError("Expectation must be a dict or a pandas DataFrame.")
