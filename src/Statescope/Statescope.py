@@ -237,7 +237,7 @@ class Statescope:
 
             # if K is a dict, include those keys too
             if isinstance(K, dict):
-                celltype_run = list(set(celltype_run) | set(K.keys()))
+                celltype_run = list(K.keys())
 
         
         # 2) build K-mapping {celltype: k or None}                     
@@ -254,7 +254,7 @@ class Statescope:
             Kmap = dict(zip(celltype_run, K))
 
         elif isinstance(K, dict):
-            Kmap = {ct: K.get(ct, None) for ct in celltype_run}
+            Kmap = K
 
         else:
             raise TypeError("K must be int, list, dict, or None.")
@@ -263,9 +263,10 @@ class Statescope:
         # 3) run cNMF / state discovery per cell type                
         
         State_dict, CopheneticCoefficients = {}, {}
-        StateScores, StateLoadings = pd.DataFrame(), pd.DataFrame()
+        StateScores, StateLoadings = {}, {}
 
         for ct in celltype_run:
+            print('Performing cNMF State Discovery for {ct}')
             model, coph = StateDiscovery_FrameWork(
                 self.GEX[ct],
                 self.Omega[ct],
@@ -282,28 +283,24 @@ class Statescope:
 
             State_dict[ct]             = model
             CopheneticCoefficients[ct] = coph
-            StateScores = pd.concat(
-                [StateScores,
-                pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
-                .add_prefix(f"{ct}_")],
-                axis=1
-            )
-            StateLoadings = pd.concat(
-                [StateLoadings,
-                pd.DataFrame(model.W, index=self.Genes)
-                .add_prefix(f"{ct}_")],
-                axis=1
-            )
+            StateScores[ct] =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples).add_prefix(f"{ct}_")
+            StateLoadings[ct] = pd.DataFrame(model.W, index=self.Genes).add_prefix(f"{ct}_")
+            
 
         
         # 4) stash results in the object                               
-        
-        self.cNMF                   = State_dict
-        self.CopheneticCoefficients = CopheneticCoefficients
-        self.StateScores            = StateScores
-        self.StateLoadings          = StateLoadings
-        self.isStateDiscoveryDone   = True
-
+        if not hasattr(self, 'isStateDiscoveryDone '):
+            self.cNMF                   = State_dict
+            self.CopheneticCoefficients = CopheneticCoefficients
+            self.StateScores            = StateScores
+            self.StateLoadings          = StateLoadings
+            self.isStateDiscoveryDone   = True
+        else:
+            self.cNMF.update(State_dict)
+            self.CopheneticCoefficients.update(CopheneticCoefficients)
+            self.StateScores.update(StateScores)
+            self.StateLoadings.update(StateLoadings)
+            
         print("StateDiscovery completed successfully.")
 
 
@@ -424,7 +421,7 @@ def Extract_GEX(Statescope_model, celltype):
     else:
         raise KeyError(f"Cell type '{celltype}' not found in the Statescope model. Available cell types: {list(Statescope_model.GEX.keys())}")
 
-def Extract_StateScores(Statescope_model):
+def Extract_StateScores(Statescope_model, celltype = None):
     """
     Extracts the state scores from a Statescope model after StateDiscovery has been performed.
 
@@ -438,7 +435,10 @@ def Extract_StateScores(Statescope_model):
         raise AttributeError("StateScores are not available. Please ensure that StateDiscovery has been completed.")
 
     # Extract the StateScores DataFrame
-    state_scores = Statescope_model.StateScores
+    if celltype == None:
+        state_loadings = pd.concat(Statescope_model.StateScores.values(), axis=1)
+    else:
+        state_loadings = Statescope_model.StateScores[celltype]
 
     # Verify the DataFrame is not empty
     if state_scores.empty:
@@ -447,9 +447,9 @@ def Extract_StateScores(Statescope_model):
     # Return the state scores
     return state_scores
 
-def Extract_StateLoadings(Statescope_model):
+def Extract_StateLoadings(Statescope_model, celltype = None):
     """
-    Extracts the StateLoadings matrix for all cell types from a Statescope model.
+    Extracts the StateLoadings matrix for all cell types (or specified celltype) from a Statescope model.
 
     :param Statescope_model: The Statescope object containing StateLoadings.
     
@@ -459,8 +459,10 @@ def Extract_StateLoadings(Statescope_model):
     """
     if not hasattr(Statescope_model, 'StateLoadings') or Statescope_model.StateLoadings is None:
         raise AttributeError("The Statescope model does not contain StateLoadings. Please ensure that StateDiscovery has been completed.")
-
-    state_loadings = Statescope_model.StateLoadings
+    if celltype == None:
+        state_loadings = pd.concat(Statescope_model.StateLoadings.values(), axis=1)
+    else:
+        state_loadings = Statescope_model.StateLoadings[celltype]
 
     # Check if the row and column names are retained
     if state_loadings.empty:
@@ -908,8 +910,7 @@ def Plot_CopheneticCoefficients(Statescope_model):
 
     # number of states retained for each cell type, derived from StateScores
     chosen_K = {
-        ct: sum(col.startswith(f"{ct}_") for col in Statescope_model.StateScores.columns)
-        for ct in Statescope_model.CopheneticCoefficients.keys()
+        ct: len(Statescope_model.StateScores[ct].columns) for ct in Statescope_model.CopheneticCoefficients.keys()
     }
 
     # ------------------------------------------------------------ #
@@ -1080,7 +1081,7 @@ def TSNE_AllStates(
     Fractions   = Statescope_model.Fractions
     GEX_all     = Statescope_model.GEX
     Omega_all   = Statescope_model.Omega
-    StateScores = Statescope_model.StateScores
+    StateScores = Extract_StateScores(Statescope_model)
 
     matrices, labels, states, samples = [], [], [], []
 
@@ -1217,7 +1218,7 @@ def TSNE_CellTypes(
     Omega_all   = Statescope_model.Omega
     GEX_all     = Statescope_model.GEX
     Fractions   = Statescope_model.Fractions
-    StateScores = Statescope_model.StateScores
+    StateScores = Extract_StateScores(Statescope_model)
 
     all_cts  = list(Omega_all.keys())
     colors   = sns.color_palette("husl", len(all_cts))

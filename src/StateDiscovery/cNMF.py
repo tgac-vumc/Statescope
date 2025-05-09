@@ -81,7 +81,9 @@ def StateDiscovery_FrameWork(
     # 1) cophenetic sweep  (only when K is None)
  
     if K is None:
+        print(f'A value of K is automatically selected between 2 and {max_clusters}')
         for k in range(2, max_clusters):
+            print(f'Running initial cNMF ({n_iter} iterations) with K={k}')
             cNMF_model_k, cophcor_k, consensus_k = cNMF(data_scaled, k, n_iter, Ncores)
 
             
@@ -103,10 +105,11 @@ def StateDiscovery_FrameWork(
                       or biggest_drop(sweep_curve)
     else:
         nclust = K
-
-  
+    
     # 2) final long run at chosen k
-  
+    
+    print(f'The selected value for K is {nclust}')
+    print(f'Running final cNMF ({n_final_iter} iterations) with K={k}')
     cNMF_model, cophcors_final, consensus_matrix = \
         cNMF(data_scaled, nclust, n_final_iter, Ncores)
 
@@ -119,15 +122,29 @@ def StateDiscovery_FrameWork(
         return cNMF_model, cophcors_final  # single float
 
 
-# StateRetrieveal: Calculate state scores with predefined state loadings
+# StateRetrieveal: Calculate state scores with predefined state loadings in external dataset
 def StateRetrieval(GEX,Omega,Fractions,celltype,StateLoadings,weighing = 'Omega'):
+    """
+      Run cNMF‐based state-retrieval for a single cell type with predefined Stateloadings.
+
+      :param GEX:           Cell type-specifc gene expression matrix (genes × samples (or single cells)).
+      :param Omega:         Gene-wise variance estimates for the same genes, can also be derived from scRNAseq (e.g. scVar).
+      :param Fractions:     Cell-type fractions per sample (used by some
+                            weighing modes).
+      :param celltype:      Name of the cell type being analysed (for logging).
+      :param weighing:      Scaling applied in ``Create_Cluster_Matrix``  
+                            (``'Omega'`` | ``'OmegaFractions'`` | ``'centering'``
+                            | ``'no_weighing'``).
+      :return: ``StateScores``, StateScores of states retrieved in new data
+    """
     # Find overlapping genes and subset
-    Genes = [gene for gene in data.columns if gene in StateLoadings.index]
+    Genes = [gene for gene in GEX.columns if gene in StateLoadings.index]
     data_scaled = Create_Cluster_Matrix(GEX.loc[:,Genes],Omega[Genes,:],Fractions,celltype,weighing)
     StateLoadings = StateLoadings.loc[Genes,:]
     # Run cNMF recovery
     cNMF_model = cNMF_Retrieval(data_scaled,StateLoadings)
-    return cNMF_model
+    StateScores = pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,cNMF_model.H.T))
+    return StateScores
 
                 
     
