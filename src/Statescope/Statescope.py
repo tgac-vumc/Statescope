@@ -31,7 +31,7 @@ from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
 from BLADE_Deconvolution.BLADE import Framework_Iterative,Purify_AllGenes
-from StateDiscovery.cNMF import StateDiscovery_FrameWork
+from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
@@ -266,7 +266,7 @@ class Statescope:
         StateScores, StateLoadings = {}, {}
 
         for ct in celltype_run:
-            print('Performing cNMF State Discovery for {ct}')
+            print(f'Performing cNMF State Discovery for {ct}')
             model, coph = StateDiscovery_FrameWork(
                 self.GEX[ct],
                 self.Omega[ct],
@@ -289,7 +289,7 @@ class Statescope:
 
         
         # 4) stash results in the object                               
-        if not hasattr(self, 'isStateDiscoveryDone '):
+        if not hasattr(self, 'isStateDiscoveryDone'):
             self.cNMF                   = State_dict
             self.CopheneticCoefficients = CopheneticCoefficients
             self.StateScores            = StateScores
@@ -297,7 +297,6 @@ class Statescope:
             self.isStateDiscoveryDone   = True
         else:
             self.cNMF.update(State_dict)
-            self.CopheneticCoefficients.update(CopheneticCoefficients)
             self.StateScores.update(StateScores)
             self.StateLoadings.update(StateLoadings)
             
@@ -488,6 +487,9 @@ def Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing='Omega'):
         raise ValueError("Invalid weighing method.")
 
     return Cluster_matrix
+
+
+
 
 
 # Function to check Bulk format

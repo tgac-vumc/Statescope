@@ -109,7 +109,7 @@ def StateDiscovery_FrameWork(
     # 2) final long run at chosen k
     
     print(f'The selected value for K is {nclust}')
-    print(f'Running final cNMF ({n_final_iter} iterations) with K={k}')
+    print(f'Running final cNMF ({n_final_iter} iterations) with K={nclust}')
     cNMF_model, cophcors_final, consensus_matrix = \
         cNMF(data_scaled, nclust, n_final_iter, Ncores)
 
@@ -123,7 +123,7 @@ def StateDiscovery_FrameWork(
 
 
 # StateRetrieveal: Calculate state scores with predefined state loadings in external dataset
-def StateRetrieval(GEX,Omega,Fractions,celltype,StateLoadings,weighing = 'Omega'):
+def StateRetrieval(GEX,Omega,celltype,StateLoadings,weighing = 'Omega',Fractions = None):
     """
       Run cNMF‐based state-retrieval for a single cell type with predefined Stateloadings.
 
@@ -139,7 +139,7 @@ def StateRetrieval(GEX,Omega,Fractions,celltype,StateLoadings,weighing = 'Omega'
     """
     # Find overlapping genes and subset
     Genes = [gene for gene in GEX.columns if gene in StateLoadings.index]
-    data_scaled = Create_Cluster_Matrix(GEX.loc[:,Genes],Omega[Genes,:],Fractions,celltype,weighing)
+    data_scaled = Create_Cluster_Matrix(GEX.loc[:,Genes],Omega.loc[Genes,:],Fractions,celltype,weighing)
     StateLoadings = StateLoadings.loc[Genes,:]
     # Run cNMF recovery
     cNMF_model = cNMF_Retrieval(data_scaled,StateLoadings)
