@@ -20,7 +20,7 @@ The python package of Statescope is available on pip:
 pip install Statescope
 ```
 
-We tested Statescope with `python => 3.6`.
+We tested Statescope with `python => 3.10`.
 
 ###  Running a demo script
 
