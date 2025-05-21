@@ -26,8 +26,6 @@ import math
 import warnings
 
 from timeit import default_timer as timer
-np.random.seed(42)
-torch.manual_seed(42)
 
 # The below function is a decorator to cast numpy arrays to torch tensors
 def cast_args_to_torch(func):
@@ -989,7 +987,6 @@ class BLADE:
 
 
 def Optimize(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0, Nu_Init, Omega_Init, Nsample, Ncell, Init_Fraction):
-    np.random.seed(42)
     Beta_Init = np.random.gamma(shape=1, size=(Nsample, Ncell)) * 0.1 + t(Init_Fraction) * 10
     obs = BLADE(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0,
             Nu_Init, Omega_Init, Beta_Init, fix_Nu=True, fix_Omega=True)
@@ -1056,7 +1053,6 @@ def Iterative_Optimization(X, stdX, Y, Alpha, Alpha0, Kappa0, SY, Rep, Init_Frac
 
     # Optimization without given Temperature
     # s2 = timer()
-    np.random.seed(42)
     Beta_Init = np.random.gamma(shape=1, size=(Nsample, Ncell)) + t(Init_Fraction) * Init_Trust
     # print(Beta_Init, "Beta_init")
     obj = BLADE(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0,
