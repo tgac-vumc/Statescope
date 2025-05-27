@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+9#!/usr/bin/python3
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # Statescope.py
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -289,7 +289,7 @@ class Statescope:
 
         
         # 4) stash results in the object                               
-        if not hasattr(self, 'isStateDiscoveryDone'):
+        if not hasattr(self, 'cNMF'):
             self.cNMF                   = State_dict
             self.CopheneticCoefficients = CopheneticCoefficients
             self.StateScores            = StateScores
