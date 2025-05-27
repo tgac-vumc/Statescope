@@ -45,7 +45,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
 import requests
 from io import StringIO
-import os  
+import os
+import warnings
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -365,8 +366,8 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
 
     Signature = Signature.loc[Genes, :]
-    Bulk = Bulk.loc[Genes, :]
     Bulk = Check_Bulk_Format(Bulk)
+    Bulk = Bulk.loc[Genes, :]
     Markers = Signature[Signature.IsMarker].index.tolist()
 
     Omega_columns = ['scVar_' + ct for ct in Celltypes]
@@ -506,8 +507,10 @@ def Check_Bulk_Format(Bulk):
     if Bulk.columns.duplicated().any():
         raise ValueError("Bulk DataFrame contains duplicate sample names in column index.")
     # Original checks and operations
-    if np.mean(Bulk > 10).any():
-        print('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.')
+    if ((Bulk.sum() >9999) & (Bulk.sum() <10001)).all(): # Not exactly 10k is possible due to rounding
+        print('The supplied Bulk matrix is in the correct scale (linear and counts per 10k)')
+    elif (Bulk.mean()>10).any():
+        warnings.warn('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.')
         Bulk = Bulk.apply(lambda x: x / sum(x) * 10000, axis=0)
     elif (Bulk < 0).any().any():
         raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required.')
