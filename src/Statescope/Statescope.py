@@ -436,9 +436,9 @@ def Extract_StateScores(Statescope_model, celltype = None):
 
     # Extract the StateScores DataFrame
     if celltype == None:
-        state_loadings = pd.concat(Statescope_model.StateScores.values(), axis=1)
+        state_scores = pd.concat(Statescope_model.StateScores.values(), axis=1)
     else:
-        state_loadings = Statescope_model.StateScores[celltype]
+        state_scores = Statescope_model.StateScores[celltype]
 
     # Verify the DataFrame is not empty
     if state_scores.empty:
@@ -1000,7 +1000,7 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
         cell_type = '_'.join(state.split('_')[:-1])
         state_number = int(state.split('_')[-1])  # Convert state number to integer
         # Get top genes for the state
-        top_gene_values = state_loadings[state].abs().nlargest(top_genes)
+        top_gene_values = state_loadings[state].nlargest(top_genes)
         for gene, coeff in top_gene_values.items():
             bar_data.append((cell_type, state, state_number, coeff, gene))
 
