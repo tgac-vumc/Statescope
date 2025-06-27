@@ -328,7 +328,7 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
   #subset Markers if supplied before creating signature 
     if Signature is not None:
         if isinstance(Signature, pd.DataFrame):
-            Check_Signature_validity(Signature)
+            Signature = Check_Signature_validity(Signature)
         elif isinstance(Signature, ad.AnnData):
              Signature = CreateSignature(
                 Signature,
@@ -356,7 +356,7 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
             error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
             error_msg += ', '.join(available_signatures[TumorType])
             raise ValueError(error_msg)
-    
+        Signature = Check_Signature_validity(Signature)
     if MarkerList:
         Signature['IsMarker'] = Signature.index.isin(MarkerList)
 
@@ -522,6 +522,12 @@ def Check_Signature_validity(Signature):
     if isinstance(Signature, pd.DataFrame):
         if not 'IsMarker' in Signature.columns:
             raise AssertionError('IsMarker column is missing in Signature')
+        
+        # check if any 0's in scVar, if so add a constant
+        scVar_columns = [col for col in Signature.columns if 'scVar' in col]
+        if (Signature[scVar_columns] == 0).any():
+            Signature[scVar_columns] = Signature[scVar_columns] + 0.01 # add constant
+    return Signature
 
 
 
