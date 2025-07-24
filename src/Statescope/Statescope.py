@@ -897,7 +897,7 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     plt.show()
 
 
-def Plot_CopheneticCoefficients(Statescope_model):
+def Plot_CopheneticCoefficients(Statescope_model, show = True, fname = None):
     """
     Create a line plot for cophenetic coefficients of all cell types for different values of k.
     The red dot indiciates the chosen model.
@@ -976,7 +976,10 @@ def Plot_CopheneticCoefficients(Statescope_model):
 
     g.set_axis_labels("k (number of states)", "Cophenetic coefficient")
     g.fig.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.savefig(fname)
     
     
 
