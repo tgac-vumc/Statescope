@@ -71,7 +71,7 @@ def StateDiscovery_FrameWork(
               cophenetic coefficients if a sweep was run, otherwise the single
               final coefficient.
       """
-    # build the cluster matrix 
+    # build the cluster matrix (samples x genes)
     data_scaled = Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing)
 
     data_dict   = {}         
@@ -146,7 +146,90 @@ def StateRetrieval(GEX,Omega,celltype,StateLoadings,weighing = 'Omega',Fractions
     StateScores = pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,cNMF_model.H.T))
     return StateScores
 
-                
+
+def EcoTypeDiscovery_FrameWork(Statescores,
+        K=None,
+        n_iter=10,
+        n_final_iter=100,
+        min_cophenetic=0.95,
+        max_clusters=10,
+        Ncores=10):
+    """
+        Run the cNMF‐based EcoType-discovery workflow
+
+        :param Statescores:   Statescores dict (samples x states with cts for keys).
+        :param K:             Desired number of states.  
+                                • *None* ⇒ run a cophenetic sweep to choose *k*  
+                                • int   ⇒ use that value and skip the sweep.
+        :param n_iter:        Number of cNMF restarts **per k** during the sweep.
+        :param n_final_iter:  Restarts for the final model at the chosen *k*.
+        :param min_cophenetic:Threshold for the cophenetic coefficient; the first
+                                k ≥ this value is selected.
+        :param max_clusters:  Maximum k tested in the sweep (upper bound, excl.).
+        :param Ncores:        CPU cores used for parallel cNMF runs.
+        
+        :return: ``(final_model, coeffs)``, where *coeffs* is the full list of
+              cophenetic coefficients if a sweep was run, otherwise the single
+              final coefficient.
+    """
+    # build the concatenated statescore matrix
+    
+    Statescores_concat = pd.DataFrame()    
+    for ct in Statescores.keys():
+        Statescores_concat = pd.concat([Statescores_concat, Statescores[ct]], axis =1)
+    
+    Statescores_concat = Statescores_concat.to_numpy() ## Convert for further use
+    print(Statescores_concat)
+    print(Statescores_concat.shape)
+    data_dict   = {}         
+    sweep_curve = None        # list of cophenetic coefficients if we sweep
+    
+    
+    # 1) cophenetic sweep  (only when K is None)
+    
+    if K is None:
+        print(f'A value of K is automatically selected between 2 and {max_clusters}')
+        for k in range(2, max_clusters):
+            print(f'Running initial cNMF ({n_iter} iterations) with K={k}')
+            cNMF_model_k, cophcor_k, consensus_k = cNMF(Statescores_concat, k, n_iter, Ncores)
+            
+            
+            H = cNMF_model_k.H
+            cluster_assignments = [
+                int(np.where(H[:, i] == H[:, i].max())[0] + 1)
+                for i in range(H.shape[1])
+            ]
+            data_dict[k] = {
+                "model":              cNMF_model_k,
+                "cophcor":            cophcor_k,
+                "consensus":          consensus_k,
+                "cluster_assignments": cluster_assignments,
+            }
+        
+        ks         = sorted(data_dict)
+        sweep_curve = [data_dict[k]["cophcor"] for k in ks]
+        nclust      = find_threshold(sweep_curve, ks, min_cophenetic) \
+                      or biggest_drop(sweep_curve)
+    else:
+        nclust = K
+    
+    # 2) final long run at chosen k
+    
+    print(f'The selected value for K is {nclust}')
+    print(f'Running final cNMF ({n_final_iter} iterations) with K={nclust}')
+    cNMF_model, cophcors_final, consensus_matrix = \
+        cNMF(Statescores_concat, nclust, n_final_iter, Ncores)
+    
+    
+    # 3) return 
+    
+    if sweep_curve is not None:
+        return cNMF_model, sweep_curve     # list of coefficients
+    else:
+        return cNMF_model, cophcors_final  # single float
+
+
+
     
 
 
