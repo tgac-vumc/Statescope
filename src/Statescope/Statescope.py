@@ -31,7 +31,7 @@ from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
 from BLADE_Deconvolution.BLADE import Framework_Iterative,Purify_AllGenes
-from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval
+from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval, EcoTypeDiscovery_FrameWork
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
@@ -78,9 +78,9 @@ class Statescope:
 
         self.isDeconvolutionDone = False
         self.isRefinementDone = False
-        self.isStateDiscoveryDone = False
+        self.isStateDiscoveryDone = False        
+        self.isEcoTypeDiscoveryDone = False
         
-
     @staticmethod
     def _detect_devices_from_obj(obj):
         """Return {'cpu','cuda'} (or subset) based on tensors/nn.Modules inside obj."""
@@ -552,6 +552,73 @@ class Statescope:
             
         print("StateDiscovery completed successfully.")
 
+        
+    def EcotypeDiscovery(
+        self,
+        K: int | None = None,
+        n_iter: int = 10,
+        n_final_iter: int = 100,
+        min_cophenetic: float = 0.9,
+        max_clusters: int = 10):
+        """
+         
+        Perform EcoTypeDiscovery from StateScores using cNMF.
+
+        :param K: single value of number of states to consider.
+                If None, an optimal K is determined.
+        :param n_iter: Number of initial cNMF restarts.
+        :param n_final_iter: Number of final cNMF restarts.
+        :param min_cophenetic: Minimum cophenetic coefficient to determine K.
+        :param max_clusters: Maximum number of clusters/states to consider.
+
+        :param K : int  None, optional
+            • None   – automatically chooses k  
+            • int    – force k to specific number 
+
+        **Examples**
+
+        >>> Model.EcoTypeDiscovery(K=2)
+        Forces k = 2.
+
+        >>> Model.EcoTypeDiscovery()
+        K picked automatically.
+                
+        """
+        
+        # 0) checks                                         
+        
+        if not self.isStateDiscoveryDone:
+            raise RuntimeError("Run StateDiscovery before EcoTypeDiscovery.")
+        
+        # 1) run cNMF / EcoTypeDiscovery               
+        print('Performing cNMF EcoType Discovery')
+        model, coph = EcoTypeDiscovery_FrameWork(
+                self.StateScores,
+                K,                 # may be None → auto
+                n_iter,
+                n_final_iter,
+                min_cophenetic,
+                max_clusters,
+                self.Ncores)
+        
+        EcoType_dict = model
+        EcoType_CopheneticCoefficients = coph
+        EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
+        EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
+             
+        # 2) stash results in the object                               
+        if not hasattr(self, 'EcoType_cNMF'):
+            self.EcoType_cNMF                   = EcoType_dict
+            self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
+            self.EcoTypeScores            = EcoTypeScores
+            self.EcoTypeLoadings          = EcoTypeLoadings
+            self.isEcoTypeDiscoveryDone   = True
+        else:
+            self.EcoType_cNMF.update(EcoType_dict)
+            self.EcoTypeScores.update(EcoTypeScores)
+            self.EcoTypeLoadings.update(EcoTypeLoadings)
+            
+        print("EcoTypeDiscovery completed successfully.")
 
 
 #-------------------------------------------------------------------------------
@@ -840,6 +907,13 @@ def fetch_signature(tumor_type, n_celltypes):
     except requests.HTTPError:
         return None
 
+    
+def get_StateNames(self):
+    statenames = list()
+    for ct in self.Celltypes:
+        statenames.extend(self.StateScores[ct].columns.to_list())
+    return(statenames)
+        
 #####UPDATE the token after 31/12/2025
 
 
