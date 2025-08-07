@@ -701,6 +701,111 @@ def Heatmap_Fractions(Statescope_model):
     # Show the plot
     plt.show()
 
+def Boxplot_CelltypeAbundance(
+        Statescope_model,
+        *,
+        order_by: str = "median",
+        figsize: tuple = (10, 6),
+        show_points: bool = True,
+        point_size: int = 40,
+        palette: str | list | dict = "husl",
+        mean_fs: int = 8):
+    """
+    Box‑plot of cell‑type fractions across samples.
+
+    • Boxes coloured by cell type.
+    • Mean shown as a small grey bar + red numeric label.
+    """
+    # 0) checks -----------------------------------------------------
+    if not hasattr(Statescope_model, "Fractions") or Statescope_model.Fractions is None:
+        raise ValueError("No Fractions found – run Deconvolution first.")
+    if Statescope_model.Fractions.empty:
+        raise ValueError("Fractions DataFrame is empty.")
+
+    frac = Statescope_model.Fractions.copy()
+
+    # 1) column order ---------------------------------------------
+    if order_by == "median":
+        order = frac.median().sort_values(ascending=False).index
+    elif order_by == "mean":
+        order = frac.mean().sort_values(ascending=False).index
+    else:
+        order = frac.columns
+
+    # 2) long‑form DF ---------------------------------------------
+    long_df = (frac[order]
+               .reset_index(names="Sample")
+               .melt(id_vars="Sample",
+                     var_name="Cell Type",
+                     value_name="Fraction"))
+
+    # 3) palette dict ---------------------------------------------
+    if isinstance(palette, str):
+        colours = sns.color_palette(palette, len(order))
+        palette_dict = dict(zip(order, colours))
+    elif isinstance(palette, list):
+        if len(palette) < len(order):
+            raise ValueError("Palette list shorter than number of cell types.")
+        palette_dict = dict(zip(order, palette))
+    elif isinstance(palette, dict):
+        missing = [ct for ct in order if ct not in palette]
+        if missing:
+            extra = sns.color_palette("husl", len(missing))
+            palette_dict = palette | dict(zip(missing, extra))
+        else:
+            palette_dict = palette
+    else:
+        raise TypeError("`palette` must be str, list or dict.")
+
+    # 4) plot ------------------------------------------------------
+    plt.figure(figsize=figsize)
+
+    sns.boxplot(
+        data=long_df,
+        x="Cell Type",
+        y="Fraction",
+        order=order,
+        palette=palette_dict,            # ← coloured fill
+        showcaps=True,
+        boxprops={"edgecolor": "black", "linewidth": 1},
+        medianprops={"color": "black"},
+        whiskerprops={"color": "black"},
+        flierprops={"marker": "o", "markersize": 3,
+                    "markerfacecolor": "grey", "markeredgecolor": "grey"}
+    )
+
+    if show_points:
+        sns.stripplot(
+            data=long_df,
+            x="Cell Type",
+            y="Fraction",
+            order=order,
+            color="black",               # ← black fill
+            edgecolor="darkgrey",        # subtle border
+            linewidth=0.4,
+            size=point_size / 10,
+            jitter=True,
+            alpha=0.55
+        )
+
+    # 5) mean bar + label -----------------------------------------
+    for idx, ct in enumerate(order):
+        mean_val = frac[ct].mean()
+        plt.plot([idx - 0.25, idx + 0.25], [mean_val, mean_val],
+                 color="darkgrey", linewidth=2)
+        plt.text(idx, mean_val + 0.02, f"{mean_val:.2f}",
+                 ha="center", va="bottom",
+                 fontsize=mean_fs, color="red")
+
+    plt.xticks(rotation=90)
+    plt.ylabel("Fraction")
+    plt.xlabel("Cell type")
+    plt.title("Distribution of Cell‑type Abundances Across Samples")
+    plt.tight_layout()
+    plt.show()
+
+
+
 def Heatmap_GEX(Statescope_model, celltype):
     """
     Plots a clustered heatmap of the purified gene expression matrix for a specific cell type,
