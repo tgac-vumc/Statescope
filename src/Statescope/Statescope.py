@@ -47,6 +47,7 @@ import requests
 from io import StringIO
 import os
 import warnings
+import pickle
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -66,6 +67,53 @@ class Statescope:
         self.isRefinementDone = False
         self.isStateDiscoveryDone = False
 
+    def save(self, filepath, to_cpu=True):
+        """
+        Save the Statescope object to disk.
+        - Moves all PyTorch model tensors to CPU to maximize portability.
+        - Can be loaded back on either GPU or CPU.
+        """
+        state = self.__dict__.copy()
+        # Handle BLADE (or other attributes) if they are PyTorch objects
+        for attr in ['BLADE', 'BLADE_final']:
+            if attr in state and hasattr(state[attr], 'state_dict'):
+                # Save state_dict (move to CPU)
+                sd = state[attr].state_dict()
+                for k, v in sd.items():
+                    sd[k] = v.cpu() if hasattr(v, "cpu") else v
+                state[attr + '_state_dict'] = sd
+                # Remove actual model to avoid pickle issues
+                state[attr] = None
+
+        # Save the rest with pickle
+        with open(filepath, "wb") as f:
+            pickle.dump(state, f)
+        print(f"Statescope object saved to {filepath} (as CPU-compatible).")
+
+    @classmethod
+    def load(cls, filepath, device='cpu', blade_class=None, *init_args, **init_kwargs):
+        """
+        Load a Statescope object from disk.
+        - device: 'cpu' or 'cuda' (or 'cuda:0', etc)
+        - blade_class: Provide the BLADE class if you need to restore BLADE objects.
+        """
+        with open(filepath, "rb") as f:
+            state = pickle.load(f)
+
+        # Create empty instance
+        obj = cls.__new__(cls)
+        obj.__dict__.update(state)
+
+        # Restore BLADE or BLADE_final if needed
+        for attr in ['BLADE', 'BLADE_final']:
+            state_dict_key = attr + '_state_dict'
+            if state_dict_key in state and blade_class is not None:
+                model = blade_class()  # Should match the initialization used in your workflow
+                model.load_state_dict(state[state_dict_key], strict=False)
+                model.to(device)
+                setattr(obj, attr, model)
+        print(f"Statescope object loaded from {filepath} (on {device}).")
+        return obj
 
     def Deconvolution(self, Ind_Marker=None,
                         Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
