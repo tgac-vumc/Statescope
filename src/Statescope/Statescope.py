@@ -520,13 +520,12 @@ def Check_Bulk_Format(Bulk):
 # Function to check if custom Signature is valid
 def Check_Signature_validity(Signature):
     if isinstance(Signature, pd.DataFrame):
-        if not 'IsMarker' in Signature.columns:
+        if 'IsMarker' not in Signature.columns:
             raise AssertionError('IsMarker column is missing in Signature')
-        
-        # check if any 0's in scVar, if so add a constant
+
         scVar_columns = [col for col in Signature.columns if 'scVar' in col]
-        if (Signature[scVar_columns] == 0).any():
-            Signature[scVar_columns] = Signature[scVar_columns] + 0.01 # add constant
+        if (Signature[scVar_columns] == 0).any().any():
+            Signature[scVar_columns] = Signature[scVar_columns] + 0.01
     return Signature
 
 
