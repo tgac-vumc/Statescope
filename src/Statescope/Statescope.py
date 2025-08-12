@@ -48,6 +48,20 @@ from io import StringIO
 import os
 import warnings
 import pickle
+import torch
+import io
+from datetime import datetime
+
+
+def _count_tensors(obj):
+        """Recursively count torch tensors in a nested structure."""
+        if torch.is_tensor(obj):
+            return 1
+        if isinstance(obj, dict):
+            return sum(_count_tensors(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return sum(_count_tensors(v) for v in obj)
+        return 0
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -66,54 +80,186 @@ class Statescope:
         self.isDeconvolutionDone = False
         self.isRefinementDone = False
         self.isStateDiscoveryDone = False
+        
+
+    @staticmethod
+    def _detect_devices_from_obj(obj):
+        """Return {'cpu','cuda'} (or subset) based on tensors/nn.Modules inside obj."""
+        devices = set()
+
+        def walk(x):
+            if torch.is_tensor(x):
+                devices.add('cuda' if x.is_cuda else 'cpu')
+                return
+            if hasattr(x, "parameters") and callable(getattr(x, "parameters", None)):
+                try:
+                    for p in x.parameters():
+                        if torch.is_tensor(p):
+                            devices.add('cuda' if p.is_cuda else 'cpu')
+                except Exception:
+                    pass
+            if isinstance(x, dict):
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, (list, tuple)):
+                for v in x:
+                    walk(v)
+
+        walk(obj)
+        if not devices:
+            devices.add('cpu')
+        return devices
+
+    @staticmethod
+    def _format_device_set(devs: set[str]) -> str:
+        if devs == {'cpu'}: return 'cpu'
+        if devs == {'cuda'}: return 'cuda'
+        return 'mixed'
 
     def save(self, filepath, to_cpu=True):
-        """
-        Save the Statescope object to disk.
-        - Moves all PyTorch model tensors to CPU to maximize portability.
-        - Can be loaded back on either GPU or CPU.
-        """
+        saved_format = "CPU-portable" if to_cpu else "device-preserving"
         state = self.__dict__.copy()
-        # Handle BLADE (or other attributes) if they are PyTorch objects
-        for attr in ['BLADE', 'BLADE_final']:
-            if attr in state and hasattr(state[attr], 'state_dict'):
-                # Save state_dict (move to CPU)
-                sd = state[attr].state_dict()
-                for k, v in sd.items():
-                    sd[k] = v.cpu() if hasattr(v, "cpu") else v
-                state[attr + '_state_dict'] = sd
-                # Remove actual model to avoid pickle issues
-                state[attr] = None
+        has_blade_sd = False
+        has_refine_sd = False
 
-        # Save the rest with pickle
+        # Extract & (optionally) CPU-ify state_dicts from torch modules
+        for attr in ['BLADE', 'BLADE_final']:
+            mod = state.get(attr, None)
+            if getattr(mod, 'state_dict', None):
+                sd = mod.state_dict()
+                if to_cpu:
+                    for k, v in sd.items():
+                        if torch.is_tensor(v):
+                            sd[k] = v.detach().cpu()
+                state[attr + '_state_dict'] = sd
+                state[attr] = None
+                if attr == 'BLADE':        has_blade_sd = True
+                if attr == 'BLADE_final':  has_refine_sd = True
+
+        # (Optionally) CPU-ify other tensors
+        if to_cpu:
+            def _to_cpu(obj):
+                if torch.is_tensor(obj):
+                    return obj.detach().cpu()
+                if isinstance(obj, dict):
+                    return {k: _to_cpu(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_to_cpu(v) for v in obj]
+                if isinstance(obj, tuple):
+                    return tuple(_to_cpu(v) for v in obj)
+                return obj
+            state = _to_cpu(state)
+
+        # Minimal metadata for nicer load messages
+        from datetime import datetime
+        state["__statescope_meta"] = {
+            "saved_format": saved_format,
+            "torch_version": torch.__version__,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "has_blade_state": has_blade_sd,
+            "has_refine_state": has_refine_sd,
+        }
+
         with open(filepath, "wb") as f:
-            pickle.dump(state, f)
-        print(f"Statescope object saved to {filepath} (as CPU-compatible).")
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        print(f"Saved Statescope → {filepath} (format: {saved_format})")
+
 
     @classmethod
     def load(cls, filepath, device='cpu', blade_class=None, *init_args, **init_kwargs):
-        """
-        Load a Statescope object from disk.
-        - device: 'cpu' or 'cuda' (or 'cuda:0', etc)
-        - blade_class: Provide the BLADE class if you need to restore BLADE objects.
-        """
+        def _move_any_tensors(obj, target):
+            if torch.is_tensor(obj):
+                return obj.to(target)
+            if hasattr(obj, "to") and callable(getattr(obj, "to")):
+                try:
+                    obj.to(target)
+                    return obj
+                except Exception:
+                    pass
+            if isinstance(obj, dict):
+                return {k: _move_any_tensors(v, target) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                seq = [_move_any_tensors(v, target) for v in obj]
+                return type(obj)(seq)
+            return obj
+
+        if isinstance(device, str) and device.startswith("cuda") and not torch.cuda.is_available():
+            print("CUDA requested but not available → loading on CPU instead.")
+            device = 'cpu'
+
         with open(filepath, "rb") as f:
-            state = pickle.load(f)
+            raw = f.read()
 
-        # Create empty instance
-        obj = cls.__new__(cls)
-        obj.__dict__.update(state)
+        state = None
+        try:
+            state = torch.load(io.BytesIO(raw), map_location='cpu', weights_only=False)
+        except Exception:
+            pass
 
-        # Restore BLADE or BLADE_final if needed
-        for attr in ['BLADE', 'BLADE_final']:
-            state_dict_key = attr + '_state_dict'
-            if state_dict_key in state and blade_class is not None:
-                model = blade_class()  # Should match the initialization used in your workflow
-                model.load_state_dict(state[state_dict_key], strict=False)
-                model.to(device)
-                setattr(obj, attr, model)
-        print(f"Statescope object loaded from {filepath} (on {device}).")
-        return obj
+        if state is None:
+            orig_torch_load = torch.load
+            def _torch_load_cpu(file_like, *args, **kwargs):
+                kwargs['map_location'] = 'cpu'
+                return orig_torch_load(file_like, **kwargs)
+            torch.load = _torch_load_cpu
+            try:
+                state = pickle.loads(raw)
+            except Exception:
+                pass
+            finally:
+                torch.load = orig_torch_load
+
+        if state is None:
+            state = pickle.loads(raw)
+
+        meta = {}
+        if isinstance(state, dict):
+            meta = state.get("__statescope_meta", {}) or {}
+
+        saved_format = meta.get("saved_format", "unknown")
+        had_blade_sd = bool(meta.get("has_blade_state", False))
+        had_ref_sd   = bool(meta.get("has_refine_state", False))
+
+        if isinstance(state, cls):
+            obj = state
+            obj.__dict__ = _move_any_tensors(obj.__dict__, device)
+            print(f"Loaded Statescope [file:legacy] on {device}")
+            return obj
+
+        if isinstance(state, dict):
+            obj = cls.__new__(cls)
+            obj.__dict__.update(state)
+
+            rebuilt_blade = False
+            rebuilt_ref   = False
+            if blade_class is None and (had_blade_sd or had_ref_sd or
+                                        "BLADE_state_dict" in state or
+                                        "BLADE_final_state_dict" in state):
+                print("BLADE weights present but 'blade_class' not provided → modules not restored.")
+
+            for attr in ['BLADE', 'BLADE_final']:
+                key = f"{attr}_state_dict"
+                if key in state and state[key] is not None and blade_class is not None:
+                    model = blade_class(*init_args, **init_kwargs)
+                    model.load_state_dict(state[key], strict=False)
+                    model.to(device)
+                    setattr(obj, attr, model)
+                    if attr == 'BLADE':        rebuilt_blade = True
+                    if attr == 'BLADE_final':  rebuilt_ref   = True
+
+            obj.__dict__ = _move_any_tensors(obj.__dict__, device)
+
+            blade_tag = ("restored" if rebuilt_blade or rebuilt_ref else
+                        "skipped"  if (had_blade_sd or had_ref_sd) else
+                        "none")
+            print(f"Loaded Statescope [file:{saved_format}] on {device} (blade: {blade_tag})")
+            return obj
+
+        raise TypeError(
+            f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}"
+        )
+
 
     def Deconvolution(self, Ind_Marker=None,
                         Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
