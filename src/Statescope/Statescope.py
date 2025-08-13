@@ -50,7 +50,6 @@ import warnings
 import pickle
 import torch
 import io
-from datetime import datetime
 
 
 def _count_tensors(obj):
@@ -178,7 +177,6 @@ class Statescope:
         state["__statescope_meta"] = {
             "saved_format": saved_format,
             "torch_version": torch.__version__,
-            "timestamp": datetime.isoformat() + "Z",
             "has_blade_state": has_blade_sd,
             "has_refine_state": has_refine_sd,
         }
