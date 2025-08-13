@@ -117,6 +117,31 @@ class Statescope:
         return 'mixed'
 
     def save(self, filepath, to_cpu=True):
+        """
+        Save a Statescope object to disk with optional CPU conversion.
+
+        Parameters
+        ----------
+        filepath : str
+            Destination path for the saved file (should end with `.pickle`).
+        to_cpu : bool, default=True
+            If True, all tensors are moved to CPU before saving (CPU-portable mode).
+            If False, tensors remain on their current device (device-preserving mode).
+
+        Notes
+        -----
+        * Use `to_cpu=True` if the file will be loaded on systems without GPU.
+        * Use `to_cpu=False` if you want to keep tensors on GPU for reloading on
+        the same GPU environment.
+
+        Examples
+        --------
+        >>> # Save a CPU-portable version (recommended for sharing)
+        >>> model.save("model_cpu.pickle", to_cpu=True)
+
+        >>> # Save a GPU-preserving version (reloads faster on the same GPU)
+        >>> model.save("model_gpu.pickle", to_cpu=False)
+        """
         saved_format = "CPU-portable" if to_cpu else "device-preserving"
         state = self.__dict__.copy()
         has_blade_sd = False
@@ -150,12 +175,10 @@ class Statescope:
                 return obj
             state = _to_cpu(state)
 
-        # Minimal metadata for nicer load messages
-        from datetime import datetime
         state["__statescope_meta"] = {
             "saved_format": saved_format,
             "torch_version": torch.__version__,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.isoformat() + "Z",
             "has_blade_state": has_blade_sd,
             "has_refine_state": has_refine_sd,
         }
@@ -168,6 +191,40 @@ class Statescope:
 
     @classmethod
     def load(cls, filepath, device='cpu', blade_class=None, *init_args, **init_kwargs):
+        """
+        Load a Statescope object from disk onto the desired device.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the saved Statescope file.
+        device : str, default='cpu'
+            Target device to move all tensors and modules to.
+            Use 'cuda' or 'cuda:N' for GPU, falls back to CPU if unavailable.
+        blade_class : type, optional
+            Class used to rebuild BLADE/BLADE_final from state_dict when the file
+            does not contain full module instances (weights-only save).
+            If None and modules were saved in full (default in new saves), they are
+            restored directly without needing `blade_class`.
+
+            Notes on `blade_class`:
+            - **Not needed** for files saved with the new "always save modules" mode
+            (these embed full BLADE instances and work without specifying it).
+            - **Required** for:
+                * Legacy CPU-portable/state_dict-only files.
+                * Cross-environment migration where only weights are saved.
+                * Environments or policies that forbid pickled class instances.
+            - Leaving this parameter ensures backwards compatibility and allows
+            switching to lighter, portable saves in the future.
+
+        *init_args, **init_kwargs :
+            Arguments passed to `blade_class` if re-building modules from state_dict.
+
+        Returns
+        -------
+        Statescope
+            The loaded Statescope object with tensors moved to the requested device.
+        """
         def _move_any_tensors(obj, target):
             if torch.is_tensor(obj):
                 return obj.to(target)
@@ -253,7 +310,7 @@ class Statescope:
             blade_tag = ("restored" if rebuilt_blade or rebuilt_ref else
                         "skipped"  if (had_blade_sd or had_ref_sd) else
                         "none")
-            print(f"Loaded Statescope [file:{saved_format}] on {device} (blade: {blade_tag})")
+            print(f"Loaded Statescope [file:{saved_format}] on {device}")
             return obj
 
         raise TypeError(
