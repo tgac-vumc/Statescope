@@ -1,0 +1,27 @@
+name: statescope
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas<2.0.0
+  - numba
+  - scikit-learn
+  - scipy
+  - joblib
+  - matplotlib
+  - statsmodels
+  - autogenes
+  - multiprocess
+  - anndata>=0.7
+  # --- GPU-specific versions ---
+  - pytorch=2.4.*        # Stable GPU build
+  - torchvision=0.19.*
+  - torchaudio=2.4.*
+  - pytorch-cuda=12.1    # Match to your GPU driver
+  # ------------------------------
+  - seaborn
+  - requests

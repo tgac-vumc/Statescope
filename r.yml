@@ -1,0 +1,34 @@
+name: R
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  # R & basics
+  - r-base=4.4.*          # pairs with Bioconductor 3.19
+  - r-essentials
+  - r-remotes
+  - r-devtools
+
+  # CRAN packages (conda builds)
+  - r-matrix
+  - r-readr
+  - r-dplyr
+  - r-tibble
+  - r-optparse
+
+  # Bioconductor core
+  - bioconductor-biocgenerics
+  - bioconductor-biobase
+  - bioconductor-s4vectors
+  - bioconductor-iranges
+  - bioconductor-genomeinfodb
+  - bioconductor-genomeinfodbdata
+  - bioconductor-delayedarray
+  - bioconductor-summarizedexperiment
+  - bioconductor-singlecellexperiment
+
+  # MuSiC deps frequently needed
+  - bioconductor-limma
+  - bioconductor-edger
+  - bioconductor-toast

@@ -17,7 +17,7 @@ Statescope_model.StateDiscovery()
 """
 #
 # TODO:
-# 1) Testing by Jurrian 
+# New version; Aryamaan 
 #
 # History:
 #  13-12-2024: File creation, write code, test Deconvolution and Refinement
@@ -30,7 +30,7 @@ Statescope_model.StateDiscovery()
 from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
-from BLADE_Deconvolution.BLADE import Framework_Iterative,Purify_AllGenes
+from BLADE_Deconvolution.BLADE_lite import Framework_Iterative,Purify_AllGenes
 from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
@@ -47,6 +47,19 @@ import requests
 from io import StringIO
 import os
 import warnings
+import pickle
+import torch
+import io
+
+def _count_tensors(obj):
+        """Recursively count torch tensors in a nested structure."""
+        if torch.is_tensor(obj):
+            return 1
+        if isinstance(obj, dict):
+            return sum(_count_tensors(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return sum(_count_tensors(v) for v in obj)
+        return 0
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -65,31 +78,302 @@ class Statescope:
         self.isDeconvolutionDone = False
         self.isRefinementDone = False
         self.isStateDiscoveryDone = False
+        
+
+    @staticmethod
+    def _detect_devices_from_obj(obj):
+        """Return {'cpu','cuda'} (or subset) based on tensors/nn.Modules inside obj."""
+        devices = set()
+
+        def walk(x):
+            if torch.is_tensor(x):
+                devices.add('cuda' if x.is_cuda else 'cpu')
+                return
+            if hasattr(x, "parameters") and callable(getattr(x, "parameters", None)):
+                try:
+                    for p in x.parameters():
+                        if torch.is_tensor(p):
+                            devices.add('cuda' if p.is_cuda else 'cpu')
+                except Exception:
+                    pass
+            if isinstance(x, dict):
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, (list, tuple)):
+                for v in x:
+                    walk(v)
+
+        walk(obj)
+        if not devices:
+            devices.add('cpu')
+        return devices
+
+    @staticmethod
+    def _format_device_set(devs: set[str]) -> str:
+        if devs == {'cpu'}: return 'cpu'
+        if devs == {'cuda'}: return 'cuda'
+        return 'mixed'
+
+    def save(self, filepath, to_cpu=True):
+        """
+        Save a Statescope object to disk with optional CPU conversion.
+
+        Parameters
+        ----------
+        filepath : str
+            Destination path for the saved file (should end with `.pickle`).
+        to_cpu : bool, default=True
+            If True, all tensors are moved to CPU before saving (CPU-portable mode).
+            If False, tensors remain on their current device (device-preserving mode).
+
+        Notes
+        -----
+        * Use `to_cpu=True` if the file will be loaded on systems without GPU.
+        * Use `to_cpu=False` if you want to keep tensors on GPU for reloading on
+        the same GPU environment.
+
+        Examples
+        --------
+        >>> # Save a CPU-portable version (recommended for sharing)
+        >>> model.save("model_cpu.pickle", to_cpu=True)
+
+        >>> # Save a GPU-preserving version (reloads faster on the same GPU)
+        >>> model.save("model_gpu.pickle", to_cpu=False)
+        """
+        saved_format = "CPU-portable" if to_cpu else "device-preserving"
+        state = self.__dict__.copy()
+        has_blade_sd = False
+        has_refine_sd = False
+
+       # Extract & always store state_dicts from torch modules (lambda-safe)
+        for attr in ['BLADE', 'BLADE_final']:
+            mod = state.get(attr, None)
+            if getattr(mod, 'state_dict', None):
+                sd = mod.state_dict()
+                # Move tensors to CPU if requested
+                if to_cpu:
+                    sd = {k: (v.detach().cpu() if torch.is_tensor(v) else v)
+                        for k, v in sd.items()}
+                state[attr + '_state_dict'] = sd
+                state[attr] = None  # Always drop the full object to avoid lambda pickling
+                if attr == 'BLADE':
+                    has_blade_sd = True
+                elif attr == 'BLADE_final':
+                    has_refine_sd = True
+
+        # (Optionally) CPU-ify other tensors
+        if to_cpu:
+            def _to_cpu(obj):
+                if torch.is_tensor(obj):
+                    return obj.detach().cpu()
+                if isinstance(obj, dict):
+                    return {k: _to_cpu(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_to_cpu(v) for v in obj]
+                if isinstance(obj, tuple):
+                    return tuple(_to_cpu(v) for v in obj)
+                return obj
+            state = _to_cpu(state)
+
+        state["__statescope_meta"] = {
+            "saved_format": saved_format,
+            "torch_version": torch.__version__,
+            "has_blade_state": has_blade_sd,
+            "has_refine_state": has_refine_sd,
+        }
+
+        with open(filepath, "wb") as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        print(f"Saved Statescope → {filepath} (format: {saved_format})")
 
 
-    def Deconvolution(self, Ind_Marker=None,
-                        Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
-                        Nrep=10, Njob=10, fsel=0, Update_SigmaY=False, Init_Trust=10,
-                        Expectation=None, Temperature=None, IterMax=100):
-        """ 
+    @classmethod
+    def load(cls, filepath, device='cpu', blade_class=None, *init_args, **init_kwargs):
+        """
+        Load a Statescope object from disk onto the desired device.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the saved Statescope file.
+        device : str, default='cpu'
+            Target device to move all tensors and modules to.
+            Use 'cuda' or 'cuda:N' for GPU, falls back to CPU if unavailable.
+        blade_class : type, optional
+            Class used to rebuild BLADE/BLADE_final from state_dict when the file
+            does not contain full module instances (weights-only save).
+            If None and modules were saved in full (default in new saves), they are
+            restored directly without needing `blade_class`.
+
+            Notes on `blade_class`:
+            - **Not needed** for files saved with the new "always save modules" mode
+            (these embed full BLADE instances and work without specifying it).
+            - **Required** for:
+                * Legacy CPU-portable/state_dict-only files.
+                * Cross-environment migration where only weights are saved.
+                * Environments or policies that forbid pickled class instances.
+            - Leaving this parameter ensures backwards compatibility and allows
+            switching to lighter, portable saves in the future.
+
+        *init_args, **init_kwargs :
+            Arguments passed to `blade_class` if re-building modules from state_dict.
+
+        Returns
+        -------
+        Statescope
+            The loaded Statescope object with tensors moved to the requested device.
+        """
+        def _move_any_tensors(obj, target):
+            if torch.is_tensor(obj):
+                return obj.to(target)
+            if hasattr(obj, "to") and callable(getattr(obj, "to")):
+                try:
+                    obj.to(target)
+                    return obj
+                except Exception:
+                    pass
+            if isinstance(obj, dict):
+                return {k: _move_any_tensors(v, target) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                seq = [_move_any_tensors(v, target) for v in obj]
+                return type(obj)(seq)
+            return obj
+
+        if isinstance(device, str) and device.startswith("cuda") and not torch.cuda.is_available():
+            print("CUDA requested but not available → loading on CPU instead.")
+            device = 'cpu'
+
+        with open(filepath, "rb") as f:
+            raw = f.read()
+
+        state = None
+        try:
+            state = torch.load(io.BytesIO(raw), map_location='cpu', weights_only=False)
+        except Exception:
+            pass
+
+        if state is None:
+            orig_torch_load = torch.load
+            def _torch_load_cpu(file_like, *args, **kwargs):
+                kwargs['map_location'] = 'cpu'
+                return orig_torch_load(file_like, **kwargs)
+            torch.load = _torch_load_cpu
+            try:
+                state = pickle.loads(raw)
+            except Exception:
+                pass
+            finally:
+                torch.load = orig_torch_load
+
+        if state is None:
+            state = pickle.loads(raw)
+
+        meta = {}
+        if isinstance(state, dict):
+            meta = state.get("__statescope_meta", {}) or {}
+
+        saved_format = meta.get("saved_format", "unknown")
+        had_blade_sd = bool(meta.get("has_blade_state", False))
+        had_ref_sd   = bool(meta.get("has_refine_state", False))
+
+        if isinstance(state, cls):
+            obj = state
+            obj.__dict__ = _move_any_tensors(obj.__dict__, device)
+            print(f"Loaded Statescope [file:legacy] on {device}")
+            return obj
+
+        if isinstance(state, dict):
+            obj = cls.__new__(cls)
+            obj.__dict__.update(state)
+
+            rebuilt_blade = False
+            rebuilt_ref   = False
+            if blade_class is None and (had_blade_sd or had_ref_sd or
+                                        "BLADE_state_dict" in state or
+                                        "BLADE_final_state_dict" in state):
+                print("BLADE weights present but 'blade_class' not provided → modules not restored.")
+
+            for attr in ['BLADE', 'BLADE_final']:
+                mod = state.get(attr, None)
+                if getattr(mod, 'state_dict', None):
+                    sd = mod.state_dict()
+                    if to_cpu:
+                        sd = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in sd.items()}
+                    state[attr + '_state_dict'] = sd
+                # Unconditionally drop full object to avoid pickle lambda errors
+                if attr in state:
+                    state[attr] = None
+
+
+            obj.__dict__ = _move_any_tensors(obj.__dict__, device)
+
+            blade_tag = ("restored" if rebuilt_blade or rebuilt_ref else
+                        "skipped"  if (had_blade_sd or had_ref_sd) else
+                        "none")
+            print(f"Loaded Statescope [file:{saved_format}] on {device}")
+            return obj
+
+        raise TypeError(
+            f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}"
+        )
+
+    def Deconvolution(
+        self, Ind_Marker=None,
+        Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
+        Nrep=10, Njob=10, fsel=0, Update_SigmaY=False, Init_Trust=10,
+        Expectation=None, Temperature=None, IterMax=100,
+        *, warm_start: bool = True,
+        adam_params: dict = None,   # NEW
+        lbfgs_params: dict = None,  # NEW
+        backend: str = "auto",              # NEW: "auto" | "gpu" | "cpu"
+        threads_per_job: int | None = None  # NEW: per-process CPU threads
+    ):
+        """
         Perform BLADE Deconvolution
-        :param Statescope self: Initialized Statescope
-        :param int Alpha: BLADE Hyperparameter [default = 1]
-        :param int Alpha0: BLADE Hyperparameter [default = 1000]
-        :param int Kappa0: BLADE Hyperparameter [default = 1]
-        :param int sY: BLADE Hyperparameter [default = 1]
-        :param int Nrep: Number of BLADE initializations [default = 10]
-        :param int Njob: Number of parralel jobs [default = 10]
-        :param bool Update_SigmaY: Bool indicating whether SigmaY is iteratively optimized (experimental) [default = False]
-        :param int Init_Trust: Parameter to weigh initial expectation fractions [default = 10]
-        :param numpy.array Expectation: prior expectation of fractions (Nsample,Ncell) [default = None]
-        :param [int1,int2] Temperature: Simulated annealing of optimization (Experimental) [default = None]
-        :param int IterMax: Number of maximum iterations of optimzation [default = 100]
 
-        :returns: BLADE_Object self.BLADE: BLADE object
-        :returns: pandas.DataFrame self.Fractions: Dataframe with posterior fractions (Nsample,Ncell)
+        Parameters
+        ----------
+        Alpha, Alpha0, Kappa0, sY : BLADE hyperparameters
+        Nrep : int
+            Number of BLADE initializations (replicates).
+        Njob : int
+            Number of parallel workers (processes). On GPU, best set to #GPUs.
+        fsel : float
+            Feature selection threshold (unchanged).
+        Update_SigmaY : bool
+            Whether to iteratively update SigmaY (experimental).
+        Init_Trust : int
+            Weight for initial expected fractions.
+        Expectation : np.ndarray or dict
+            Prior expectation of fractions (Nsample, Ncell).
+        Temperature : None or [Tmin, Tmax]
+            Simulated annealing schedule (experimental).
+        IterMax : int
+            Max outer iterations.
+
+        warm_start : bool
+            Use Adam warm-up before L-BFGS (unchanged).
+        adam_params, lbfgs_params : dict
+            Optimizer knobs (unchanged).
+
+        backend : {"auto","gpu","cpu"}, default "auto"
+            - "gpu": one process per GPU (recommended on multi-GPU)
+            - "cpu": Njob processes × threads_per_job threads each
+            - "auto": pick "gpu" if CUDA visible; otherwise "cpu"
+
+        threads_per_job : int or None
+            Per-process CPU threads (used only when backend="cpu").
+            If None, Framework_Iterative will auto-split available cores.
+
+        Returns
+        -------
+        Populates:
+            self.BLADE : BLADE object (best replicate)
+            self.Fractions : pd.DataFrame (posterior fractions)
         """
 
+    
         # Prepare Signature with markers only
         scExp_marker = self.scExp.loc[self.Markers,:].to_numpy()
         scVar_marker = self.scVar.loc[self.Markers, :].to_numpy()
@@ -106,15 +390,25 @@ class Statescope:
         )
 
         
-        # Excecute BLADE Deconvolution: FrameWork iterative
-        final_obj, best_obj, best_set, outs = Framework_Iterative(scExp_marker, scVar_marker, Y, Ind_Marker,
-                        Alpha, Alpha0, Kappa0, sY,
-                        Nrep, self.Ncores, fsel, Update_SigmaY, Init_Trust,
-                        Expectation = Expectation, Temperature = Temperature, IterMax = IterMax)
-        # Save BLADE result in Statescope object
+        final_obj, best_obj, best_set, outs = Framework_Iterative(
+                scExp_marker, scVar_marker, Y, Ind_Marker,
+                Alpha, Alpha0, Kappa0, sY,
+                Nrep, Njob, fsel, Update_SigmaY, Init_Trust,
+                Expectation=Expectation, Temperature=Temperature, IterMax=IterMax,
+                warm_start=warm_start,
+                adam_params=adam_params,
+                lbfgs_params=lbfgs_params,
+                backend=backend,                    # <- NEW
+                threads_per_job=threads_per_job     # <- NEW
+            )
+
+                                                            # Save BLADE result in Statescope object
         self.BLADE = final_obj
         # Save fractions as dataframe in object
-        self.Fractions = pd.DataFrame(final_obj.ExpF(final_obj.Beta).cpu().numpy(), index=self.Samples, columns=self.Celltypes)
+        self.Fractions = pd.DataFrame(
+            final_obj.ExpF(final_obj.Beta).detach().cpu().numpy(),  
+            index=self.Samples, columns=self.Celltypes
+        )
 
         ###This one is for old oncoblade application 
         #self.Fractions =  pd.DataFrame(final_obj.ExpF(final_obj.Beta), index=self.Samples, columns=self.Celltypes)

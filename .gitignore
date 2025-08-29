@@ -1,20 +1,21 @@
-scripts/__pycache__/
-./*~
-./*/**~
-.cache/
+# Ignore Test folder
+src/Test/
+
+# Python cache
+__pycache__/
+*/__pycache__/
+
+# Temporary and backup files
+*.pyc
 *~
 *#
+.cache/
 tmp/
-*/*/__pycache__/
-*/*/*/*/*/__pycache__/
 
-
-# Ignore these files 
+# Data & large files
 *.ipynb
-__pycache__/
 *.h5ad
 *.pdf
 *.tsv
 *.mtx
 *.tar.gz
-*.pyc
