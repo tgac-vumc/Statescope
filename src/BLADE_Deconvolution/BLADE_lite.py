@@ -1389,7 +1389,289 @@ def Iterative_Optimization(
     obj.train_log = getattr(obj, "train_log", []) + run_log.records
     return obj, obj_func, Rep
 
+
+
+def _visible_cuda_devices():
+    """Honor CUDA_VISIBLE_DEVICES if set; else enumerate real devices."""
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if vis:
+        toks = [t.strip() for t in vis.split(",") if t.strip() != ""]
+        return [f"cuda:{i}" for i in range(len(toks))]
+    if torch.cuda.is_available():
+        return [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+    return []
+
+def _free_vram_gb(dev_idx: int) -> float:
+    """Free VRAM on a device in GiB; fail-open to inf on odd setups."""
+    try:
+        free_b, _ = torch.cuda.mem_get_info(dev_idx)
+        return free_b / (1024**3)
+    except Exception:
+        return float("inf")
+
+def _set_threads(num_threads: int, interop_threads: int = 1):
+    """Set per-process CPU threading (PyTorch + BLAS)."""
+    try:
+        torch.set_num_threads(max(1, int(num_threads)))
+        torch.set_num_interop_threads(max(1, int(interop_threads)))
+    except Exception:
+        pass
+    os.environ.setdefault("OMP_NUM_THREADS", str(num_threads))
+    os.environ.setdefault("MKL_NUM_THREADS", str(num_threads))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(num_threads))
+
+def plan_execution(
+    Njob: int | None,
+    Nrep: int,
+    threads_per_job: int | None,
+    backend: str = "auto",
+    est_vram_gb: float | None = None,   # optional per-rep VRAM estimate
+    vram_soft_frac: float = 0.85,       # soft headroom for VRAM packing
+):
+    """
+    Decide devices, concurrency, and CPU threads per process.
+
+    Returns:
+      dict with:
+        backend: "cpu" | "gpu"
+        devices: list[str]  # e.g., ["cuda:0","cuda:1"] or packed ["cuda:0","cuda:0",...]
+        n_jobs_eff: int     # len(devices)
+        threads_per_job_eff: int
+        rep_device: callable(rep) -> device
+        notes: list[str]
+    """
+    notes = []
+    gpus = _visible_cuda_devices()
+    ngpu = len(gpus)
+
+    # pick backend
+    if backend == "auto":
+        backend = "gpu" if ngpu > 0 else "cpu"
+
+    # ---------- CPU plan ----------
+    if backend == "cpu" or ngpu == 0:
+        backend = "cpu"
+        cores = os.cpu_count() or 1
+        n_jobs_eff = min(int(Njob or min(8, cores)), cores)
+        t_per_job  = int(threads_per_job or max(1, cores // max(1, n_jobs_eff)))
+        devices = ["cpu"] * n_jobs_eff
+        notes.append(f"CPU mode: {n_jobs_eff} workers × {t_per_job} threads (cores={cores}).")
+
+    # ---------- GPU plan ----------
+    else:
+        backend = "gpu"
+        # Default: one process per GPU, but don't exceed reps
+        n_jobs_target = int(Njob) if Njob is not None else min(ngpu, Nrep)
+
+        if n_jobs_target <= ngpu:
+            # one per GPU
+            n_jobs_eff = min(n_jobs_target, ngpu, Nrep)
+            devices = gpus[:n_jobs_eff]
+            t_per_job = int(threads_per_job or 1)
+            notes.append(f"GPU mode: {n_jobs_eff} workers over {ngpu} GPUs; threads/job={t_per_job}.")
+        else:
+            # pack evenly across GPUs (advanced)
+            per_gpu_req = int(math.ceil(n_jobs_target / ngpu))
+            devices = []
+            for gi in range(ngpu):
+                k = per_gpu_req
+                if est_vram_gb:
+                    free_gb = _free_vram_gb(gi) * vram_soft_frac
+                    cap = max(1, int(free_gb // float(est_vram_gb)))
+                    if k > cap:
+                        notes.append(
+                            f"Reducing procs on {gpus[gi]}: {k}→{cap} "
+                            f"(free≈{free_gb:.1f}GB, est≈{est_vram_gb:.1f}GB/rep)."
+                        )
+                        k = cap
+                devices.extend([gpus[gi]] * k)
+
+            # trim to at most requested and Nrep
+            devices = devices[:min(n_jobs_target, Nrep)]
+            n_jobs_eff = len(devices)
+            t_per_job = int(threads_per_job or 1)
+            if n_jobs_eff == 0:
+                # nothing fits under soft cap → fall back to one per GPU
+                devices = gpus[:min(ngpu, Nrep)]
+                n_jobs_eff = len(devices)
+                notes.append("Packed plan soft-capped to 0 by VRAM; falling back to 1 per GPU.")
+            notes.append(f"Packed GPU mode: {n_jobs_eff} workers across {ngpu} GPUs; threads/job={t_per_job}.")
+
+    rep_device = (lambda rep: devices[rep % max(1, len(devices))])
+    return {
+        "backend": backend,
+        "devices": devices,
+        "n_jobs_eff": n_jobs_eff,
+        "threads_per_job_eff": t_per_job,
+        "rep_device": rep_device,
+        "notes": notes,
+    }
+
+
+# =========================
+# Revised Framework_Iterative
+# =========================
 def Framework_Iterative(
+    X, stdX, Y, Ind_Marker=None,
+    Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
+    Nrep=10, Njob=None, fsel=0, Update_SigmaY=False, Init_Trust=10,
+    Expectation=None, Temperature=None, IterMax=100,
+    *, warm_start: bool = True,
+    collect_logs: bool = False,
+    adam_params: dict = None,
+    lbfgs_params: dict = None,
+    backend: str = "auto",              # "auto" | "gpu" | "cpu"
+    threads_per_job: int | None = None  # per-process CPU threads
+):
+    # --- sanitize optimizer dicts (Iterative_Optimization uses .get(...)) ---
+    adam_params  = adam_params  or {}
+    lbfgs_params = lbfgs_params or {}
+
+    args = locals()
+
+    Ngene, Nsample = Y.shape
+    if Ind_Marker is None:
+        Ind_Marker = [True] * Ngene
+
+    X_small    = X[Ind_Marker, :]
+    Y_small    = Y[Ind_Marker, :]
+    stdX_small = stdX[Ind_Marker, :]
+
+    # ---------- Plan execution (devices, concurrency, threads) ----------
+    est_vram_hint = None
+    try:
+        est_vram_hint = (adam_params.get("est_vram_gb") if adam_params else None) \
+                        or (lbfgs_params.get("est_vram_gb") if lbfgs_params else None)
+    except Exception:
+        pass
+
+    plan = plan_execution(
+        Njob=Njob, Nrep=Nrep, threads_per_job=threads_per_job,
+        backend=backend, est_vram_gb=est_vram_hint, vram_soft_frac=0.85
+    )
+    devices         = plan["devices"]
+    Njob_eff        = plan["n_jobs_eff"]
+    runtime_threads = plan["threads_per_job_eff"]
+    rep_device      = plan["rep_device"]
+
+    for line in plan["notes"]:
+        print("[Framework]", line)
+
+    # Parent: set thread limits before any parallel work
+    _set_threads(runtime_threads, interop_threads=1)
+
+    # ---------- Now safe to do any threaded work in parent ----------
+    print(f"start optimization using marker genes: {Y_small.shape[0]} genes out of {Ngene} genes.")
+    print('Initialization with Support vector regression')
+
+    # Use effective concurrency here too
+    Init_Fraction, Ind_use = SVR_Initialization(
+        X_small, Y_small, Njob=(Njob_eff or 1), Nus=[0.25, 0.5, 0.75]
+    )
+
+    # ---------- worker wrapper (with OOM hint) ----------
+    def _iter_one(rep):
+        dev = rep_device(rep)
+        print(f"[rep {rep:02d}] device={dev}, threads={runtime_threads}")
+        try:
+            return Iterative_Optimization(
+                X_small[Ind_use, :],
+                stdX_small[Ind_use, :],
+                Y_small[Ind_use, :],
+                Alpha, Alpha0, Kappa0, sY,
+                rep, Init_Fraction,
+                Expected=Expectation,
+                Init_Trust=Init_Trust,
+                iter=IterMax,
+                Update_SigmaY=Update_SigmaY,
+                device=dev,
+                warm_start=warm_start,
+                adam_params=adam_params,
+                lbfgs_params=lbfgs_params,
+                runtime_threads=runtime_threads  # worker sets *only* intra-op
+            )
+        except RuntimeError as e:
+            if ("out of memory" in str(e).lower()
+                and plan["backend"] == "gpu"
+                and len(set(devices)) == 1  # packed single-GPU case
+                and Njob_eff > 1):
+                print(f"[rep {rep:02d}] CUDA OOM in packed single-GPU mode. "
+                      f"Try smaller batch / fewer workers (Njob) / threads_per_job=1.")
+            raise
+    
+    print("DEBUG torch.cuda.is_available:", torch.cuda.is_available())
+    print("DEBUG visible devices:", _visible_cuda_devices())
+    print("DEBUG env CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+    print("DEBUG plan backend/devices/Njob_eff/threads:",
+        plan["backend"], plan["devices"], plan["n_jobs_eff"], plan["threads_per_job_eff"])
+    # ---------- Execute (parallel/serial based on Njob_eff) ----------
+    if Temperature is None or Temperature is False:
+        with parallel_backend("loky", n_jobs=Njob_eff):
+            triples = Parallel(n_jobs=Njob_eff, verbose=10)(
+                delayed(_iter_one)(rep) for rep in range(Nrep)
+            )
+        outs, convs, Reps = zip(*triples)
+
+        # Evaluate ELBO (no grad, robust to NaN/Inf)
+        cri = []
+        with torch.no_grad():
+            for obj in outs:
+                val = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
+                val = float(val.detach().cpu().item())
+                if not math.isfinite(val):
+                    val = float("-inf")
+                cri.append(val)
+
+        if all(v == float("-inf") for v in cri):
+            raise RuntimeError("All runs produced non-finite ELBO. Try lower lr/steps or inspect inputs.")
+
+        best = int(np.argmax(cri))
+        out  = outs[best]
+        conv = convs[best]
+
+    else:
+        # --- temperature schedule branch (serial here) ---
+        if Temperature is True:
+            Temperature = [1, 100]
+        else:
+            if len(Temperature) != 2:
+                raise ValueError('Temperature must be None, True, or [Tmin, Tmax].')
+            if Temperature[1] < Temperature[0]:
+                raise ValueError('Max temperature must be ≥ min temperature.')
+
+        triples = [Iterative_Optimization(
+                        X_small[Ind_use, :], stdX_small[Ind_use, :], Y_small[Ind_use, :],
+                        Alpha, Alpha0, Kappa0, sY, rep, Init_Fraction,
+                        Expected=Expectation, Init_Trust=Init_Trust,
+                        TempRange=np.linspace(Temperature[0], Temperature[1], num=IterMax),
+                        Update_SigmaY=Update_SigmaY,
+                        warm_start=warm_start,
+                        adam_params=adam_params,
+                        lbfgs_params=lbfgs_params,
+                        runtime_threads=runtime_threads
+                    ) for rep in range(Nrep)]
+
+        outs, convs, Reps = zip(*triples)
+        with torch.no_grad():
+            cri = [float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)) for obj in outs]
+        best = int(np.nanargmax(cri))
+        out  = outs[best]
+        conv = convs[best]
+
+    if collect_logs:
+        logs = [{"rep": r, "log": getattr(o, "train_log", [])} for o, r in zip(outs, Reps)]
+        return out, conv, zip(outs, cri), args, logs
+
+    return out, conv, zip(outs, cri), args
+
+
+
+
+
+
+
+
+def Framework_Iterative2(
     X, stdX, Y, Ind_Marker=None,
     Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
     Nrep=10, Njob=None, fsel=0, Update_SigmaY=False, Init_Trust=10,
@@ -1535,6 +1817,18 @@ def Framework_Iterative(
         return out, conv, zip(outs, cri), args, logs
 
     return out, conv, zip(outs, cri), args
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
