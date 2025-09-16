@@ -55,7 +55,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from Statescope.Statescope import Initialize_Statescope, Statescope
-from BLADE_Deconvolution.BLADEpro import BLADE
+from BLADE_Deconvolution.BLADE import BLADE
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run Statescope deconvolution (basic).")

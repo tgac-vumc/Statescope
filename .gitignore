@@ -19,3 +19,5 @@ tmp/
 *.tsv
 *.mtx
 *.tar.gz
+
+.vscode

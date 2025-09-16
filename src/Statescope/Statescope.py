@@ -1,7 +1,7 @@
 #!/usr/bin/python3
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # Statescope.py
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #
 # Statescope framework
 # Author: Jurriaan Janssen (j.janssen4@amsterdamumc.nl), Aryamaan Bose (a.bose1@amsterdamumc.nl)
@@ -15,23 +15,24 @@ Statescope_model.Refinement()
 Statescope_model.StateDiscovery()
 
 """
+
 #
 # TODO:
-# New version; Aryamaan 
+# New version; Aryamaan
 #
 # History:
 #  13-12-2024: File creation, write code, test Deconvolution and Refinement
 #  14-12-2024: Finish StateDiscovery testing
-#  20-01-2025: Additional checks, Utility and Visualization Functions 
+#  20-01-2025: Additional checks, Utility and Visualization Functions
 #  30-04-2025: New parameters, critical functions fixed and tested
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
-from BLADE_Deconvolution.BLADEpro import Framework_Iterative,Purify_AllGenes
-from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval
+from BLADE_Deconvolution.BLADE import Framework_Iterative, Purify_AllGenes
+from StateDiscovery.cNMF import StateDiscovery_FrameWork
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
@@ -51,21 +52,23 @@ import pickle
 import torch
 import io
 
-def _count_tensors(obj):
-        """Recursively count torch tensors in a nested structure."""
-        if torch.is_tensor(obj):
-            return 1
-        if isinstance(obj, dict):
-            return sum(_count_tensors(v) for v in obj.values())
-        if isinstance(obj, (list, tuple)):
-            return sum(_count_tensors(v) for v in obj)
-        return 0
 
-#-------------------------------------------------------------------------------
+def _count_tensors(obj):
+    """Recursively count torch tensors in a nested structure."""
+    if torch.is_tensor(obj):
+        return 1
+    if isinstance(obj, dict):
+        return sum(_count_tensors(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return sum(_count_tensors(v) for v in obj)
+    return 0
+
+
+# -------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 class Statescope:
-    def __init__(self, Bulk, scExp,scVar,Samples,Celltypes,Genes,Markers,Ncores):
+    def __init__(self, Bulk, scExp, scVar, Samples, Celltypes, Genes, Markers, Ncores):
         self.Bulk = Bulk
         self.scExp = scExp
         self.scVar = scVar
@@ -78,7 +81,6 @@ class Statescope:
         self.isDeconvolutionDone = False
         self.isRefinementDone = False
         self.isStateDiscoveryDone = False
-        
 
     @staticmethod
     def _detect_devices_from_obj(obj):
@@ -87,13 +89,13 @@ class Statescope:
 
         def walk(x):
             if torch.is_tensor(x):
-                devices.add('cuda' if x.is_cuda else 'cpu')
+                devices.add("cuda" if x.is_cuda else "cpu")
                 return
             if hasattr(x, "parameters") and callable(getattr(x, "parameters", None)):
                 try:
                     for p in x.parameters():
                         if torch.is_tensor(p):
-                            devices.add('cuda' if p.is_cuda else 'cpu')
+                            devices.add("cuda" if p.is_cuda else "cpu")
                 except Exception:
                     pass
             if isinstance(x, dict):
@@ -105,14 +107,16 @@ class Statescope:
 
         walk(obj)
         if not devices:
-            devices.add('cpu')
+            devices.add("cpu")
         return devices
 
     @staticmethod
     def _format_device_set(devs: set[str]) -> str:
-        if devs == {'cpu'}: return 'cpu'
-        if devs == {'cuda'}: return 'cuda'
-        return 'mixed'
+        if devs == {"cpu"}:
+            return "cpu"
+        if devs == {"cuda"}:
+            return "cuda"
+        return "mixed"
 
     def save(self, filepath, to_cpu=True):
         """
@@ -145,24 +149,24 @@ class Statescope:
         has_blade_sd = False
         has_refine_sd = False
 
-       # Extract & always store state_dicts from torch modules (lambda-safe)
-        for attr in ['BLADE', 'BLADE_final']:
+        # Extract & always store state_dicts from torch modules (lambda-safe)
+        for attr in ["BLADE", "BLADE_final"]:
             mod = state.get(attr, None)
-            if getattr(mod, 'state_dict', None):
+            if getattr(mod, "state_dict", None):
                 sd = mod.state_dict()
                 # Move tensors to CPU if requested
                 if to_cpu:
-                    sd = {k: (v.detach().cpu() if torch.is_tensor(v) else v)
-                        for k, v in sd.items()}
-                state[attr + '_state_dict'] = sd
+                    sd = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in sd.items()}
+                state[attr + "_state_dict"] = sd
                 state[attr] = None  # Always drop the full object to avoid lambda pickling
-                if attr == 'BLADE':
+                if attr == "BLADE":
                     has_blade_sd = True
-                elif attr == 'BLADE_final':
+                elif attr == "BLADE_final":
                     has_refine_sd = True
 
         # (Optionally) CPU-ify other tensors
         if to_cpu:
+
             def _to_cpu(obj):
                 if torch.is_tensor(obj):
                     return obj.detach().cpu()
@@ -173,6 +177,7 @@ class Statescope:
                 if isinstance(obj, tuple):
                     return tuple(_to_cpu(v) for v in obj)
                 return obj
+
             state = _to_cpu(state)
 
         state["__statescope_meta"] = {
@@ -187,9 +192,8 @@ class Statescope:
 
         print(f"Saved Statescope → {filepath} (format: {saved_format})")
 
-
     @classmethod
-    def load(cls, filepath, device='cpu', blade_class=None, *init_args, **init_kwargs):
+    def load(cls, filepath, device="cpu", blade_class=None, *init_args, **init_kwargs):
         """
         Load a Statescope object from disk onto the desired device.
 
@@ -203,19 +207,6 @@ class Statescope:
         blade_class : type, optional
             Class used to rebuild BLADE/BLADE_final from state_dict when the file
             does not contain full module instances (weights-only save).
-            If None and modules were saved in full (default in new saves), they are
-            restored directly without needing `blade_class`.
-
-            Notes on `blade_class`:
-            - **Not needed** for files saved with the new "always save modules" mode
-            (these embed full BLADE instances and work without specifying it).
-            - **Required** for:
-                * Legacy CPU-portable/state_dict-only files.
-                * Cross-environment migration where only weights are saved.
-                * Environments or policies that forbid pickled class instances.
-            - Leaving this parameter ensures backwards compatibility and allows
-            switching to lighter, portable saves in the future.
-
         *init_args, **init_kwargs :
             Arguments passed to `blade_class` if re-building modules from state_dict.
 
@@ -224,6 +215,7 @@ class Statescope:
         Statescope
             The loaded Statescope object with tensors moved to the requested device.
         """
+
         def _move_any_tensors(obj, target):
             if torch.is_tensor(obj):
                 return obj.to(target)
@@ -242,22 +234,24 @@ class Statescope:
 
         if isinstance(device, str) and device.startswith("cuda") and not torch.cuda.is_available():
             print("CUDA requested but not available → loading on CPU instead.")
-            device = 'cpu'
+            device = "cpu"
 
         with open(filepath, "rb") as f:
             raw = f.read()
 
         state = None
         try:
-            state = torch.load(io.BytesIO(raw), map_location='cpu', weights_only=False)
+            state = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=False)
         except Exception:
             pass
 
         if state is None:
             orig_torch_load = torch.load
+
             def _torch_load_cpu(file_like, *args, **kwargs):
-                kwargs['map_location'] = 'cpu'
+                kwargs["map_location"] = "cpu"
                 return orig_torch_load(file_like, **kwargs)
+
             torch.load = _torch_load_cpu
             try:
                 state = pickle.loads(raw)
@@ -275,7 +269,7 @@ class Statescope:
 
         saved_format = meta.get("saved_format", "unknown")
         had_blade_sd = bool(meta.get("has_blade_state", False))
-        had_ref_sd   = bool(meta.get("has_refine_state", False))
+        had_ref_sd = bool(meta.get("has_refine_state", False))
 
         if isinstance(state, cls):
             obj = state
@@ -288,46 +282,48 @@ class Statescope:
             obj.__dict__.update(state)
 
             rebuilt_blade = False
-            rebuilt_ref   = False
-            if blade_class is None and (had_blade_sd or had_ref_sd or
-                                        "BLADE_state_dict" in state or
-                                        "BLADE_final_state_dict" in state):
+            rebuilt_ref = False
+            if blade_class is None and (
+                had_blade_sd or had_ref_sd or "BLADE_state_dict" in state or "BLADE_final_state_dict" in state
+            ):
                 print("BLADE weights present but 'blade_class' not provided → modules not restored.")
 
-            for attr in ['BLADE', 'BLADE_final']:
-                mod = state.get(attr, None)
-                if getattr(mod, 'state_dict', None):
-                    sd = mod.state_dict()
-                    if to_cpu:
-                        sd = {k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in sd.items()}
-                    state[attr + '_state_dict'] = sd
-                # Unconditionally drop full object to avoid pickle lambda errors
+            # Always drop full modules to avoid pickle lambda errors
+            for attr in ["BLADE", "BLADE_final"]:
                 if attr in state:
                     state[attr] = None
 
-
             obj.__dict__ = _move_any_tensors(obj.__dict__, device)
 
-            blade_tag = ("restored" if rebuilt_blade or rebuilt_ref else
-                        "skipped"  if (had_blade_sd or had_ref_sd) else
-                        "none")
+            blade_tag = (
+                "restored" if rebuilt_blade or rebuilt_ref else "skipped" if (had_blade_sd or had_ref_sd) else "none"
+            )
             print(f"Loaded Statescope [file:{saved_format}] on {device}")
             return obj
 
-        raise TypeError(
-            f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}"
-        )
+        raise TypeError(f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}")
 
     def Deconvolution(
-        self, Ind_Marker=None,
-        Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
-        Nrep=10, Njob=10, fsel=0, Update_SigmaY=False, Init_Trust=10,
-        Expectation=None, Temperature=None, IterMax=1000,
-        *, warm_start: bool = True,
-        adam_params: dict = None,   # NEW
+        self,
+        Ind_Marker=None,
+        Alpha=1,
+        Alpha0=1000,
+        Kappa0=1,
+        sY=1,
+        Nrep=10,
+        Njob=10,
+        fsel=0,
+        Update_SigmaY=False,
+        Init_Trust=10,
+        Expectation=None,
+        Temperature=None,
+        IterMax=1000,
+        *,
+        warm_start: bool = True,
+        adam_params: dict = None,  # NEW
         lbfgs_params: dict = None,  # NEW
-        backend: str = "auto",              # NEW: "auto" | "gpu" | "cpu"
-        threads_per_job: int | None = None  # NEW: per-process CPU threads
+        backend: str = "auto",  # NEW: "auto" | "gpu" | "cpu"
+        threads_per_job: int | None = None,  # NEW: per-process CPU threads
     ):
         """
         Perform BLADE Deconvolution
@@ -374,46 +370,52 @@ class Statescope:
         """
 
         # Prepare Signature with markers only
-        scExp_marker = self.scExp.loc[self.Markers,:].to_numpy()
+        scExp_marker = self.scExp.loc[self.Markers, :].to_numpy()
         scVar_marker = self.scVar.loc[self.Markers, :].to_numpy()
-        
+
         # Prepare Bulk (select/match genes)
-        Y = self.Bulk.loc[self.Markers,self.Samples].to_numpy()
+        Y = self.Bulk.loc[self.Markers, self.Samples].to_numpy()
         scExp_celltypes = [ct.replace("scExp_", "") for ct in self.scExp.columns]
         scVar_celltypes = [ct.replace("scVar_", "") for ct in self.scVar.columns]
 
-        Expectation = Check_Expectation_validity(
-            Expectation,
-            celltype_order=scExp_celltypes,
-            sample_names=self.Samples
-        )
+        Expectation = Check_Expectation_validity(Expectation, celltype_order=scExp_celltypes, sample_names=self.Samples)
 
-        
         final_obj, best_obj, best_set, outs = Framework_Iterative(
-                scExp_marker, scVar_marker, Y, Ind_Marker,
-                Alpha, Alpha0, Kappa0, sY,
-                Nrep, Njob, fsel, Update_SigmaY, Init_Trust,
-                Expectation=Expectation, Temperature=Temperature, IterMax=IterMax,
-                warm_start=warm_start,
-                adam_params=adam_params,
-                lbfgs_params=lbfgs_params,
-                backend=backend,                    # <- NEW
-                threads_per_job=threads_per_job)     # <- NEW
-            
+            scExp_marker,
+            scVar_marker,
+            Y,
+            Ind_Marker,
+            Alpha,
+            Alpha0,
+            Kappa0,
+            sY,
+            Nrep,
+            Njob,
+            fsel,
+            Update_SigmaY,
+            Init_Trust,
+            Expectation=Expectation,
+            Temperature=Temperature,
+            IterMax=IterMax,
+            warm_start=warm_start,
+            adam_params=adam_params,
+            lbfgs_params=lbfgs_params,
+            backend=backend,  # <- NEW
+            threads_per_job=threads_per_job,
+        )  # <- NEW
 
-                                                            # Save BLADE result in Statescope object
+        # Save BLADE result in Statescope object
         self.BLADE = final_obj
         # Save fractions as dataframe in object
         self.Fractions = pd.DataFrame(
-            final_obj.ExpF(final_obj.Beta).detach().cpu().numpy(),  
-            index=self.Samples, columns=self.Celltypes
+            final_obj.ExpF(final_obj.Beta).detach().cpu().numpy(), index=self.Samples, columns=self.Celltypes
         )
 
-        ###This one is for old oncoblade application 
-        #self.Fractions =  pd.DataFrame(final_obj.ExpF(final_obj.Beta), index=self.Samples, columns=self.Celltypes)
+        ###This one is for old oncoblade application
+        # self.Fractions =  pd.DataFrame(final_obj.ExpF(final_obj.Beta), index=self.Samples, columns=self.Celltypes)
         self.isDeconvolutionDone = True
         print("Deconvolution completed successfully.")
-    
+
         # Check convergence flag and print message accordingly
         # Convert to a Python boolean if needed
         if self.BLADE.log:
@@ -421,11 +423,9 @@ class Statescope:
         else:
             print("Warning: Model did not converge, estimates might not be optimal.")
 
-
-        
     # Perform Gene Expression Refinement
-    def Refinement(self,weight=100,GeneList = None):
-        """ 
+    def Refinement(self, weight=100, GeneList=None):
+        """
         Perform Gene expression refinement with all genes
         :param Statescope self: Statescope
         :param int weight: Parameter to weigh down fraction estimation objective [default = 100]
@@ -436,39 +436,44 @@ class Statescope:
         """
         if not self.isDeconvolutionDone:
             raise Exception("Deconvolution must be completed before Refinement.")
-        
+
         if GeneList:
-            self.Genes = [gene for gene in Genes if gene in GeneList]
+            self.Genes = [gene for gene in self.Genes if gene in GeneList]
         # Prepare Signature
         scExp_All = self.scExp.loc[self.Genes, :].to_numpy()
         scVar_All = self.scVar.loc[self.Genes, :].to_numpy()
         # Prepare Bulk (select/match genes)
-        Y = self.Bulk.loc[self.Genes,self.Samples].to_numpy()
+        Y = self.Bulk.loc[self.Genes, self.Samples].to_numpy()
         # Perform gene expression refinement with all genes in signature
-        obj = Purify_AllGenes(self.BLADE, scExp_All, scVar_All,Y,self.Ncores, weight)
+        obj = Purify_AllGenes(self.BLADE, scExp_All, scVar_All, Y, self.Ncores, weight)
         # create output GEX dictionary
-        GEX = {ct:pd.DataFrame(obj.Nu[:,:,i],index=self.Samples,columns=self.Genes) for i,ct in enumerate(self.Celltypes)}
-        Omega = {ct:pd.DataFrame(obj.Omega[:,i],index=self.Genes,columns=[ct]) for i,ct in enumerate(self.Celltypes)}
+        GEX = {
+            ct: pd.DataFrame(obj.Nu[:, :, i], index=self.Samples, columns=self.Genes)
+            for i, ct in enumerate(self.Celltypes)
+        }
+        Omega = {
+            ct: pd.DataFrame(obj.Omega[:, i], index=self.Genes, columns=[ct]) for i, ct in enumerate(self.Celltypes)
+        }
         # Store in Statescope object
         self.BLADE_final = obj
         self.GEX = GEX
         self.Omega = Omega
-        
+
         self.isRefinementDone = True
         print("Refinement completed successfully.")
 
-
     def StateDiscovery(
-            self,
-            celltype: str | list[str] | None = None,
-            K: int | list[int] | dict[str, int] | None = None,
-            weighing: str = 'Omega',
-            n_iter: int = 10,
-            n_final_iter: int = 100,
-            min_cophenetic: float = 0.9,
-            max_clusters: int = 10):
+        self,
+        celltype: str | list[str] | None = None,
+        K: int | list[int] | dict[str, int] | None = None,
+        weighing: str = "Omega",
+        n_iter: int = 10,
+        n_final_iter: int = 100,
+        min_cophenetic: float = 0.9,
+        max_clusters: int = 10,
+    ):
         """
-         
+
         Perform StateDiscovery from ctSpecificGEX using cNMF.
 
         :param celltype: List of cell types or a single cell type for which to perform state discovery.
@@ -484,9 +489,9 @@ class Statescope:
         Cell types to analyse (default = all stored in the object).
 
         :param K : int | list[int] | dict[str, int] | None, optional
-            • None   – each cell type gets an automatically chosen k  
-            • int    – the same k for every cell type (celltype filter ignored)  
-            • list   – one k per entry in `celltype` (same order)  
+            • None   – each cell type gets an automatically chosen k
+            • int    – the same k for every cell type (celltype filter ignored)
+            • list   – one k per entry in `celltype` (same order)
             • dict   – give k for selected cell types; the rest are automatic
 
         **Examples**
@@ -503,19 +508,18 @@ class Statescope:
 
         >>> Model.StateDiscovery(celltype=['T', 'B'], K=[4, 5])
         T cells get k = 4, B cells k = 5; no other cell types analysed.
-                
+
         """
-        
-        # 0) checks                                         
-        
+
+        # 0) checks
+
         if not self.isRefinementDone:
             raise RuntimeError("Run Refinement before StateDiscovery.")
 
-        all_celltypes = list(self.Celltypes)      # stored when the object was built
+        all_celltypes = list(self.Celltypes)  # stored when the object was built
 
-        
-        # 1) normalise `celltype` argument                             
-        
+        # 1) normalise `celltype` argument
+
         if isinstance(K, int):
             # K is a single integer → analyse *all* cell types,
             # ignoring any `celltype` argument the caller provided.
@@ -533,9 +537,8 @@ class Statescope:
             if isinstance(K, dict):
                 celltype_run = list(K.keys())
 
-        
-        # 2) build K-mapping {celltype: k or None}                     
-       
+        # 2) build K-mapping {celltype: k or None}
+
         if K is None:
             Kmap = {ct: None for ct in celltype_run}
 
@@ -553,21 +556,20 @@ class Statescope:
         else:
             raise TypeError("K must be int, list, dict, or None.")
 
-        
-        # 3) run cNMF / state discovery per cell type                
-        
+        # 3) run cNMF / state discovery per cell type
+
         State_dict, CopheneticCoefficients = {}, {}
         StateScores, StateLoadings = {}, {}
 
         for ct in celltype_run:
-            print(f'Performing cNMF State Discovery for {ct}')
+            print(f"Performing cNMF State Discovery for {ct}")
             model, coph = StateDiscovery_FrameWork(
                 self.GEX[ct],
                 self.Omega[ct],
                 self.Fractions,
                 ct,
                 weighing,
-                Kmap[ct],                 # may be None → auto
+                Kmap[ct],  # may be None → auto
                 n_iter,
                 n_final_iter,
                 min_cophenetic,
@@ -575,34 +577,44 @@ class Statescope:
                 self.Ncores,
             )
 
-            State_dict[ct]             = model
+            State_dict[ct] = model
             CopheneticCoefficients[ct] = coph
-            StateScores[ct] =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples).add_prefix(f"{ct}_")
+            StateScores[ct] = pd.DataFrame(
+                np.apply_along_axis(lambda x: x / sum(x), 1, model.H.T), index=self.Samples
+            ).add_prefix(f"{ct}_")
             StateLoadings[ct] = pd.DataFrame(model.W, index=self.Genes).add_prefix(f"{ct}_")
-            
 
-        
-        # 4) stash results in the object                               
-        if not hasattr(self, 'cNMF'):
-            self.cNMF                   = State_dict
+        # 4) stash results in the object
+        if not hasattr(self, "cNMF"):
+            self.cNMF = State_dict
             self.CopheneticCoefficients = CopheneticCoefficients
-            self.StateScores            = StateScores
-            self.StateLoadings          = StateLoadings
-            self.isStateDiscoveryDone   = True
+            self.StateScores = StateScores
+            self.StateLoadings = StateLoadings
+            self.isStateDiscoveryDone = True
         else:
             self.cNMF.update(State_dict)
             self.StateScores.update(StateScores)
             self.StateLoadings.update(StateLoadings)
-            
+
         print("StateDiscovery completed successfully.")
 
 
-
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
-#-------------------------------------------------------------------------------
-def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10, fixed_n_features=None, drop_sigdiff = False):
-    """ 
+# -------------------------------------------------------------------------------
+def Initialize_Statescope(
+    Bulk,
+    Signature=None,
+    TumorType="",
+    Ncelltypes="",
+    MarkerList=None,
+    celltype_key="celltype",
+    n_highly_variable=3000,
+    Ncores=10,
+    fixed_n_features=None,
+    drop_sigdiff=False,
+):
+    """
     Initializes Statescope object with Bulk and Signature.
 
     :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected counts are expected.
@@ -617,45 +629,48 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
 
     :returns: Statescope object initialized with the given parameters.
     """
-    available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
-  #subset Markers if supplied before creating signature 
+    available_signatures = (
+        list_available_signatures()
+    )  # Fetch the structured list of available tumor types and cell types
+    # subset Markers if supplied before creating signature
     if Signature is not None:
         if isinstance(Signature, pd.DataFrame):
             Signature = Check_Signature_validity(Signature)
         elif isinstance(Signature, ad.AnnData):
-             Signature = CreateSignature(
+            Signature = CreateSignature(
                 Signature,
                 celltype_key=celltype_key,
                 CorrectVariance=True,
-                n_highly_variable=n_highly_variable, #hvg genes for autogenes parameter
-                fixed_n_features=fixed_n_features, # autogene number of genes paramter 
-                MarkerList=MarkerList,          #will use marker list instead of autogenes 
-                Bulk = Bulk,
-                drop_sigdiff= drop_sigdiff)      # if bulk and drop_sigdiff are true will calculate the and remove genes that differ significantly in expression between the two datasets
-            
+                n_highly_variable=n_highly_variable,  # hvg genes for autogenes parameter
+                fixed_n_features=fixed_n_features,  # autogene number of genes paramter
+                MarkerList=MarkerList,  # will use marker list instead of autogenes
+                Bulk=Bulk,
+                drop_sigdiff=drop_sigdiff,
+            )  # if bulk and drop_sigdiff are true will calculate the and remove genes that differ significantly in expression between the two datasets
+
     else:
-        if TumorType == '' or TumorType not in available_signatures:
+        if TumorType == "" or TumorType not in available_signatures:
             error_msg = "TumorType not specified or invalid. Available options include:\n"
             for t, cells in available_signatures.items():
                 error_msg += f"{t}: {', '.join(cells)} cell types\n"
             raise ValueError(error_msg)
-        
-        if Ncelltypes == '':
+
+        if Ncelltypes == "":
             # Select the signature with the smallest number of cell types if Ncelltypes is not specified
             Ncelltypes = min(available_signatures[TumorType], key=int)
-        
+
         Signature = fetch_signature(TumorType, Ncelltypes)
         if Signature is None:
             error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
-            error_msg += ', '.join(available_signatures[TumorType])
+            error_msg += ", ".join(available_signatures[TumorType])
             raise ValueError(error_msg)
         Signature = Check_Signature_validity(Signature)
     if MarkerList:
-        Signature['IsMarker'] = Signature.index.isin(MarkerList)
+        Signature["IsMarker"] = Signature.index.isin(MarkerList)
 
     # Continue with the initialization as before
     Samples = Bulk.columns.tolist()
-    Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
+    Celltypes = [col.split("scExp_")[1] for col in Signature.columns if "scExp_" in col]
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
 
     Signature = Signature.loc[Genes, :]
@@ -663,8 +678,8 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
     Bulk = Bulk.loc[Genes, :]
     Markers = Signature[Signature.IsMarker].index.tolist()
 
-    Omega_columns = ['scVar_' + ct for ct in Celltypes]
-    Mu_columns = ['scExp_' + ct for ct in Celltypes]
+    Omega_columns = ["scVar_" + ct for ct in Celltypes]
+    Mu_columns = ["scExp_" + ct for ct in Celltypes]
 
     # Print the number of common markers
     common_markers = set(Markers).intersection(Bulk.index)
@@ -674,14 +689,15 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
     common_genes = set(Genes).intersection(Signature.index)
     print(f"Number of genes common between Bulk and Signature: {len(common_genes)}")
 
-
-    Statescope_object = Statescope(Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores)
+    Statescope_object = Statescope(
+        Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores
+    )
     return Statescope_object
 
 
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # 1.2  Miscellaneous functions
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # Extract Gene expression matrix
 def Extract_GEX(Statescope_model, celltype):
     """
@@ -695,9 +711,11 @@ def Extract_GEX(Statescope_model, celltype):
     :raises KeyError: If the specified cell type is not found in the Statescope model's GEX dictionary.
     :raises AttributeError: If the Statescope model does not have a GEX attribute or refinement is incomplete.
     """
-    if not hasattr(Statescope_model, 'GEX'):
-        raise AttributeError("The Statescope model does not contain gene expression data. Ensure refinement has been completed.")
-    
+    if not hasattr(Statescope_model, "GEX"):
+        raise AttributeError(
+            "The Statescope model does not contain gene expression data. Ensure refinement has been completed."
+        )
+
     if not Statescope_model.isRefinementDone:
         raise Exception("Refinement must be completed before extracting gene expression data.")
 
@@ -708,23 +726,26 @@ def Extract_GEX(Statescope_model, celltype):
         # Ensure the DataFrame retains the sample and gene names
         gex_matrix.index = Statescope_model.Samples
         gex_matrix.columns = Statescope_model.Genes
-        gex_matrix.index.name = 'Samples'
-        gex_matrix.columns.name = 'Genes'
+        gex_matrix.index.name = "Samples"
+        gex_matrix.columns.name = "Genes"
         return gex_matrix
     else:
-        raise KeyError(f"Cell type '{celltype}' not found in the Statescope model. Available cell types: {list(Statescope_model.GEX.keys())}")
+        raise KeyError(
+            f"Cell type '{celltype}' not found in the Statescope model. Available cell types: {list(Statescope_model.GEX.keys())}"
+        )
 
-def Extract_StateScores(Statescope_model, celltype = None):
+
+def Extract_StateScores(Statescope_model, celltype=None):
     """
     Extracts the state scores from a Statescope model after StateDiscovery has been performed.
 
     :param Statescope_model: The Statescope object containing state discovery results.
-    
+
     :returns: pandas.DataFrame containing state scores for all samples and cell types.
     :raises AttributeError: If StateDiscovery has not been completed or the StateScores attribute is missing.
     """
     # Check if StateDiscovery has been completed
-    if not hasattr(Statescope_model, 'StateScores') or Statescope_model.StateScores is None:
+    if not hasattr(Statescope_model, "StateScores") or Statescope_model.StateScores is None:
         raise AttributeError("StateScores are not available. Please ensure that StateDiscovery has been completed.")
 
     # Extract the StateScores DataFrame
@@ -740,18 +761,21 @@ def Extract_StateScores(Statescope_model, celltype = None):
     # Return the state scores
     return state_scores
 
-def Extract_StateLoadings(Statescope_model, celltype = None):
+
+def Extract_StateLoadings(Statescope_model, celltype=None):
     """
     Extracts the StateLoadings matrix for all cell types (or specified celltype) from a Statescope model.
 
     :param Statescope_model: The Statescope object containing StateLoadings.
-    
-    :returns: pandas.DataFrame containing the state loadings with appropriate row (genes) 
+
+    :returns: pandas.DataFrame containing the state loadings with appropriate row (genes)
               and column (states) names.
     :raises AttributeError: If the Statescope model does not have StateLoadings.
     """
-    if not hasattr(Statescope_model, 'StateLoadings') or Statescope_model.StateLoadings is None:
-        raise AttributeError("The Statescope model does not contain StateLoadings. Please ensure that StateDiscovery has been completed.")
+    if not hasattr(Statescope_model, "StateLoadings") or Statescope_model.StateLoadings is None:
+        raise AttributeError(
+            "The Statescope model does not contain StateLoadings. Please ensure that StateDiscovery has been completed."
+        )
     if celltype == None:
         state_loadings = pd.concat(Statescope_model.StateLoadings.values(), axis=1)
     else:
@@ -764,26 +788,24 @@ def Extract_StateLoadings(Statescope_model, celltype = None):
     print(f"StateLoadings matrix extracted successfully. Shape: {state_loadings.shape}")
     return state_loadings
 
-def Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing='Omega'):
+
+def Create_Cluster_Matrix(GEX, Omega, Fractions, celltype, weighing="Omega"):
     """
     Create a scaled matrix for clustering.
     """
-    if weighing == 'Omega':
+    if weighing == "Omega":
         Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose()).to_numpy()
-    elif weighing == 'OmegaFractions':
-        Cluster_matrix = ((GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose())
+    elif weighing == "OmegaFractions":
+        Cluster_matrix = (GEX - np.mean(GEX, axis=0)) * Omega.loc[:, celltype].transpose()
         Cluster_matrix = Cluster_matrix.mul(Fractions[celltype], axis=0).to_numpy()
-    elif weighing == 'centering':
+    elif weighing == "centering":
         Cluster_matrix = (GEX - np.mean(GEX, axis=0)).to_numpy()
-    elif weighing == 'no_weighing':
+    elif weighing == "no_weighing":
         Cluster_matrix = GEX.to_numpy()
     else:
         raise ValueError("Invalid weighing method.")
 
     return Cluster_matrix
-
-
-
 
 
 # Function to check Bulk format
@@ -800,32 +822,34 @@ def Check_Bulk_Format(Bulk):
     if Bulk.columns.duplicated().any():
         raise ValueError("Bulk DataFrame contains duplicate sample names in column index.")
     # Original checks and operations
-    if ((Bulk.sum() >9999) & (Bulk.sum() <10001)).all(): # Not exactly 10k is possible due to rounding
-        print('The supplied Bulk matrix is in the correct scale (linear and counts per 10k)')
-    elif (Bulk.mean()>10).any():
-        warnings.warn('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.')
+    if ((Bulk.sum() > 9999) & (Bulk.sum() < 10001)).all():  # Not exactly 10k is possible due to rounding
+        print("The supplied Bulk matrix is in the correct scale (linear and counts per 10k)")
+    elif (Bulk.mean() > 10).any():
+        warnings.warn(
+            "The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed."
+        )
         Bulk = Bulk.apply(lambda x: x / sum(x) * 10000, axis=0)
     elif (Bulk < 0).any().any():
-        raise AssertionError('Bulk contains negative values. Library size corrected linear counts are required.')
- 
+        raise AssertionError("Bulk contains negative values. Library size corrected linear counts are required.")
+
     return Bulk
+
 
 # Function to check if custom Signature is valid
 def Check_Signature_validity(Signature):
     if isinstance(Signature, pd.DataFrame):
-        if 'IsMarker' not in Signature.columns:
-            raise AssertionError('IsMarker column is missing in Signature')
+        if "IsMarker" not in Signature.columns:
+            raise AssertionError("IsMarker column is missing in Signature")
 
-        scVar_columns = [col for col in Signature.columns if 'scVar' in col]
+        scVar_columns = [col for col in Signature.columns if "scVar" in col]
         if (Signature[scVar_columns] == 0).any().any():
             Signature[scVar_columns] = Signature[scVar_columns] + 0.01
     return Signature
 
 
-
 def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=None):
     if Expectation is None:
-        print('No prior knowledge of expected cell type fractions is given.')
+        print("No prior knowledge of expected cell type fractions is given.")
         return None
 
     if isinstance(Expectation, dict):
@@ -839,8 +863,10 @@ def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=No
             raise ValueError("Group and Expectation must be numpy arrays in the dictionary format.")
 
         if group_expect.shape[1] != group_mat.shape[0]:
-            raise ValueError(f"Shape mismatch: Expectation has {group_expect.shape[1]} groups, "
-                             f"but Group matrix has {group_mat.shape[0]} rows.")
+            raise ValueError(
+                f"Shape mismatch: Expectation has {group_expect.shape[1]} groups, "
+                f"but Group matrix has {group_mat.shape[0]} rows."
+            )
 
         temp = np.matmul(group_expect, group_mat)
 
@@ -851,7 +877,7 @@ def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=No
             raise ValueError("The Expectation contains 1 which is not allowed. Use a large value like 0.99.")
 
         print("Grouped prior knowledge is utilised in refining fraction estimates.")
-        return Expectation  
+        return Expectation
 
     elif isinstance(Expectation, pd.DataFrame):
         if celltype_order is not None:
@@ -872,7 +898,7 @@ def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=No
     else:
         raise ValueError("Expectation must be a dict or a pandas DataFrame.")
 
-        
+
 def fetch_signature(tumor_type, n_celltypes):
     """Fetches the signature file directly from GitHub based on tumor type and number of cell types."""
     file_name = f"{tumor_type}_Signature_{n_celltypes}celltypes.txt"
@@ -880,9 +906,10 @@ def fetch_signature(tumor_type, n_celltypes):
     try:
         response = requests.get(file_url)
         response.raise_for_status()
-        return pd.read_csv(StringIO(response.text), sep='\t', index_col='Gene')
+        return pd.read_csv(StringIO(response.text), sep="\t", index_col="Gene")
     except requests.HTTPError:
         return None
+
 
 #####UPDATE the token after 31/12/2025
 
@@ -890,48 +917,55 @@ def fetch_signature(tumor_type, n_celltypes):
 def list_available_signatures():
     """Lists the availaible signatures in the StatescopeData repository"""
     base_url = "https://api.github.com/repos/tgac-vumc/StatescopeData/contents/"
-    
+
     # Try without the token first
     response = requests.get(base_url)
     data = response.json()
 
-    if 'message' in data and 'API rate limit exceeded' in data['message']:
+    if "message" in data and "API rate limit exceeded" in data["message"]:
         # If rate limit exceeded, try using the environment token
-        token = os.getenv('GITHUB_TOKEN')
+        token = os.getenv("GITHUB_TOKEN")
         if not token:
             print("API rate limit exceeded. No environment token found.")
-            print("Learn how to create and set a GitHub token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token")
+            print(
+                "Learn how to create and set a GitHub token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token"
+            )
             return {}
-        
+
         # Use the token from environment
-        headers = {'Authorization': f'token {token}'}
+        headers = {"Authorization": f"token {token}"}
         response = requests.get(base_url, headers=headers)
         data = response.json()
-        if 'message' in data and 'API rate limit exceeded' in data['message']:
+        if "message" in data and "API rate limit exceeded" in data["message"]:
             print("API rate limit exceeded, even using the environment GitHub token.")
-            print("Learn how to create and set a GitHub token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token")
+            print(
+                "Learn how to create and set a GitHub token: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token"
+            )
             return {}
 
     available_signatures = {}
     if isinstance(data, list):
         for folder in data:
-            if 'type' in folder and folder['type'] == 'dir':
-                tumor_type = folder['name']
-                files_url = folder['url']
-                files_response = requests.get(files_url, headers=headers if 'Authorization' in locals() else {})
+            if "type" in folder and folder["type"] == "dir":
+                tumor_type = folder["name"]
+                files_url = folder["url"]
+                files_response = requests.get(files_url, headers=headers if "Authorization" in locals() else {})
                 files_data = files_response.json()
-                cell_types = [file['name'].split('_')[-1].replace('celltypes.txt', '') for file in files_data if 'Signature' in file['name']]
+                cell_types = [
+                    file["name"].split("_")[-1].replace("celltypes.txt", "")
+                    for file in files_data
+                    if "Signature" in file["name"]
+                ]
                 available_signatures[tumor_type] = cell_types
     else:
         print("Unexpected data structure received from GitHub API:", data)
     return available_signatures
 
 
-
-
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # 1.2  Define Statescope plotting functions
-#-------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
+
 
 def generate_color_map(state_columns):
     """
@@ -942,7 +976,7 @@ def generate_color_map(state_columns):
     :returns: A dictionary mapping column names to colors.
     """
     # Extract unique cell types using the full prefix before the last underscore
-    unique_cell_types = sorted(set(['_'.join(col.split('_')[:-1]) for col in state_columns]))
+    unique_cell_types = sorted(set(["_".join(col.split("_")[:-1]) for col in state_columns]))
     color_map = {}
 
     # Generate a large base color palette for unique cell types
@@ -954,7 +988,7 @@ def generate_color_map(state_columns):
         base_color = cell_type_colors[cell_type]
 
         # Generate distinct shades for states within the cell type
-        states = [col for col in state_columns if '_'.join(col.split('_')[:-1]) == cell_type]
+        states = [col for col in state_columns if "_".join(col.split("_")[:-1]) == cell_type]
         shades = sns.light_palette(base_color, n_colors=len(states), reverse=False, input="rgb")
 
         # Assign each state a shade
@@ -967,10 +1001,10 @@ def generate_color_map(state_columns):
 def Heatmap_Fractions(Statescope_model):
     """
     Visualizes the cell type fractions per sample using a clustered heatmap.
-    
+
     :param Statescope_model: An instance of the Statescope class with Fractions data.
     """
-    if not hasattr(Statescope_model, 'Fractions') or Statescope_model.Fractions is None:
+    if not hasattr(Statescope_model, "Fractions") or Statescope_model.Fractions is None:
         raise ValueError("The Statescope model does not have Fractions data. Ensure Deconvolution has been run.")
     if Statescope_model.Fractions.empty:
         raise ValueError("The Fractions DataFrame is empty. Check data initialization and deconvolution results.")
@@ -979,30 +1013,38 @@ def Heatmap_Fractions(Statescope_model):
     fractions = Statescope_model.Fractions
 
     # Generate a clustermap
-    g = sns.clustermap(fractions, annot=True, fmt=".2f", cmap="coolwarm",
-                       figsize=(12, 8), cbar_kws={'label': 'Fraction'},
-                       method='average')  # method can be 'single', 'complete', 'average', etc.
+    g = sns.clustermap(
+        fractions,
+        annot=True,
+        fmt=".2f",
+        cmap="coolwarm",
+        figsize=(12, 8),
+        cbar_kws={"label": "Fraction"},
+        method="average",
+    )  # method can be 'single', 'complete', 'average', etc.
 
     # Enhance the plot aesthetics
     plt.setp(g.ax_heatmap.get_yticklabels(), rotation=0)  # Rotate the y-axis labels for better readability
-    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=90) # Rotate the x-axis labels for better readability
+    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=90)  # Rotate the x-axis labels for better readability
 
-    plt.title('Cell Type Fractions per Sample')
-    plt.ylabel('Sample')
-    plt.xlabel('Cell Type')
+    plt.title("Cell Type Fractions per Sample")
+    plt.ylabel("Sample")
+    plt.xlabel("Cell Type")
 
     # Show the plot
     plt.show()
 
+
 def Boxplot_CelltypeAbundance(
-        Statescope_model,
-        *,
-        order_by: str = "median",
-        figsize: tuple = (10, 6),
-        show_points: bool = True,
-        point_size: int = 40,
-        palette: str | list | dict = "husl",
-        mean_fs: int = 8):
+    Statescope_model,
+    *,
+    order_by: str = "median",
+    figsize: tuple = (10, 6),
+    show_points: bool = True,
+    point_size: int = 40,
+    palette: str | list | dict = "husl",
+    mean_fs: int = 8,
+):
     """
     Box‑plot of cell‑type fractions across samples.
 
@@ -1026,11 +1068,9 @@ def Boxplot_CelltypeAbundance(
         order = frac.columns
 
     # 2) long‑form DF ---------------------------------------------
-    long_df = (frac[order]
-               .reset_index(names="Sample")
-               .melt(id_vars="Sample",
-                     var_name="Cell Type",
-                     value_name="Fraction"))
+    long_df = (
+        frac[order].reset_index(names="Sample").melt(id_vars="Sample", var_name="Cell Type", value_name="Fraction")
+    )
 
     # 3) palette dict ---------------------------------------------
     if isinstance(palette, str):
@@ -1058,13 +1098,12 @@ def Boxplot_CelltypeAbundance(
         x="Cell Type",
         y="Fraction",
         order=order,
-        palette=palette_dict,            # ← coloured fill
+        palette=palette_dict,  # ← coloured fill
         showcaps=True,
         boxprops={"edgecolor": "black", "linewidth": 1},
         medianprops={"color": "black"},
         whiskerprops={"color": "black"},
-        flierprops={"marker": "o", "markersize": 3,
-                    "markerfacecolor": "grey", "markeredgecolor": "grey"}
+        flierprops={"marker": "o", "markersize": 3, "markerfacecolor": "grey", "markeredgecolor": "grey"},
     )
 
     if show_points:
@@ -1073,22 +1112,19 @@ def Boxplot_CelltypeAbundance(
             x="Cell Type",
             y="Fraction",
             order=order,
-            color="black",               # ← black fill
-            edgecolor="darkgrey",        # subtle border
+            color="black",  # ← black fill
+            edgecolor="darkgrey",  # subtle border
             linewidth=0.4,
             size=point_size / 10,
             jitter=True,
-            alpha=0.55
+            alpha=0.55,
         )
 
     # 5) mean bar + label -----------------------------------------
     for idx, ct in enumerate(order):
         mean_val = frac[ct].mean()
-        plt.plot([idx - 0.25, idx + 0.25], [mean_val, mean_val],
-                 color="darkgrey", linewidth=2)
-        plt.text(idx, mean_val + 0.02, f"{mean_val:.2f}",
-                 ha="center", va="bottom",
-                 fontsize=mean_fs, color="red")
+        plt.plot([idx - 0.25, idx + 0.25], [mean_val, mean_val], color="darkgrey", linewidth=2)
+        plt.text(idx, mean_val + 0.02, f"{mean_val:.2f}", ha="center", va="bottom", fontsize=mean_fs, color="red")
 
     plt.xticks(rotation=90)
     plt.ylabel("Fraction")
@@ -1096,7 +1132,6 @@ def Boxplot_CelltypeAbundance(
     plt.title("Distribution of Cell‑type Abundances Across Samples")
     plt.tight_layout()
     plt.show()
-
 
 
 def Heatmap_GEX(Statescope_model, celltype):
@@ -1124,8 +1159,8 @@ def Heatmap_GEX(Statescope_model, celltype):
         annot=False,
         figsize=(12, 10),
         xticklabels=False,  # Completely remove x-axis tick labels
-        yticklabels=gex_matrix.index,   # Retain original y-axis labels
-        cbar_kws={'label': 'Expression Level'}
+        yticklabels=gex_matrix.index,  # Retain original y-axis labels
+        cbar_kws={"label": "Expression Level"},
     )
 
     # Add x-axis title to the heatmap
@@ -1137,12 +1172,13 @@ def Heatmap_GEX(Statescope_model, celltype):
 
 
 def Heatmap_StateScores(
-        Statescope_model,
-        *,
-        col_width: float = 0.35,     # inch per state column
-        row_height: float = 0.35,    # inch per sample row
-        bottom: float = 0.28,        # extra margin for x-labels (0-1)
-        label_pad: int = 40):        # gap between heat-map and x-labels
+    Statescope_model,
+    *,
+    col_width: float = 0.35,  # inch per state column
+    row_height: float = 0.35,  # inch per sample row
+    bottom: float = 0.28,  # extra margin for x-labels (0-1)
+    label_pad: int = 40,
+):  # gap between heat-map and x-labels
     """
     Heat-map of state scores with auto-scaled figure size so column labels and
     state numbers never overlap.
@@ -1166,16 +1202,16 @@ def Heatmap_StateScores(
     state_scores = Extract_StateScores(Statescope_model)
 
     cell_states = state_scores.columns
-    cell_types  = ['_'.join(c.split('_')[:-1]) for c in cell_states]
-    state_nums  = [c.split('_')[-1]            for c in cell_states]
+    cell_types = ["_".join(c.split("_")[:-1]) for c in cell_states]
+    state_nums = [c.split("_")[-1] for c in cell_states]
 
     # ------------------------------------------------------------ #
     # 2) dynamic figure size                                       #
     # ------------------------------------------------------------ #
     n_cols = state_scores.shape[1]
     n_rows = state_scores.shape[0]
-    fig_w  = max(8, col_width  * n_cols)      # at least 8 inch wide
-    fig_h  = max(6, row_height * n_rows)      # at least 6 inch tall
+    fig_w = max(8, col_width * n_cols)  # at least 8 inch wide
+    fig_h = max(6, row_height * n_rows)  # at least 6 inch tall
     plt.figure(figsize=(fig_w, fig_h))
 
     # ------------------------------------------------------------ #
@@ -1187,7 +1223,7 @@ def Heatmap_StateScores(
         cbar_kws={"label": "State Scores"},
         xticklabels=False,
         yticklabels=True,
-        linewidths=0.5
+        linewidths=0.5,
     )
     ax = plt.gca()
 
@@ -1195,13 +1231,13 @@ def Heatmap_StateScores(
     palette = generate_color_map(cell_states)
     for x, num in enumerate(state_nums):
         ax.text(
-            x + 0.5, n_rows + 0.5,
+            x + 0.5,
+            n_rows + 0.5,
             num,
-            ha='center',
-            va='center',
+            ha="center",
+            va="center",
             fontsize=8,
-            bbox=dict(facecolor=palette[cell_states[x]], edgecolor='none',
-                      boxstyle='round,pad=0.3', alpha=0.8)
+            bbox=dict(facecolor=palette[cell_states[x]], edgecolor="none", boxstyle="round,pad=0.3", alpha=0.8),
         )
 
     # x-tick labels: one per cell type
@@ -1213,14 +1249,13 @@ def Heatmap_StateScores(
             prev = ctype
 
     ax.set_xticks(xticks)
-    ax.set_xticklabels(labels, rotation=90, ha='center', va='top', fontsize=10)
-    ax.tick_params(axis='x', pad=label_pad)
-    plt.gcf().subplots_adjust(bottom=bottom)   # reserve space for labels
+    ax.set_xticklabels(labels, rotation=90, ha="center", va="top", fontsize=10)
+    ax.tick_params(axis="x", pad=label_pad)
+    plt.gcf().subplots_adjust(bottom=bottom)  # reserve space for labels
 
     ax.set_xlabel("")
     ax.set_title("State Scores Heatmap", fontsize=14)
     plt.show()
-
 
 
 def Heatmap_StateLoadings(Statescope_model, top_genes=None):
@@ -1233,7 +1268,7 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     :param Statescope_model:  A fitted Statescope object; must contain the
                               ``StateLoadings`` matrix produced by
                               *StateDiscovery*.
-    :param top_genes:         If *None* (default) plot all genes.  
+    :param top_genes:         If *None* (default) plot all genes.
                               If an int *N*, plot only the *N* genes with the
                               highest absolute loading across all states
                               (one global ranking).
@@ -1251,8 +1286,8 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
 
     # Separate cell types and states for labels
     cell_states = state_loadings.columns
-    cell_types = ['_'.join(col.split('_')[:-1]) for col in cell_states]  # Full cell type names
-    state_numbers = [col.split('_')[-1] for col in cell_states]
+    cell_types = ["_".join(col.split("_")[:-1]) for col in cell_states]  # Full cell type names
+    state_numbers = [col.split("_")[-1] for col in cell_states]
 
     # Create a heatmap
     plt.figure(figsize=(16, 12))
@@ -1262,7 +1297,7 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
         cbar_kws={"label": "State Loadings"},
         xticklabels=False,  # Turn off default x-tick labels
         yticklabels=True,
-        linewidths=0.5
+        linewidths=0.5,
     )
 
     # Access the axes
@@ -1272,9 +1307,14 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
     for x, state in enumerate(state_numbers):
         color = color_map[state_loadings.columns[x]]  # Get the color for the current state
         ax.text(
-            x + 0.5, len(state_loadings) + 0.2,  # Position closer to the heatmap
-            state, fontsize=8, ha='center', va='bottom', color='black',
-            bbox=dict(facecolor=color, edgecolor='none', boxstyle='round,pad=0.2', alpha=0.8)
+            x + 0.5,
+            len(state_loadings) + 0.2,  # Position closer to the heatmap
+            state,
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            color="black",
+            bbox=dict(facecolor=color, edgecolor="none", boxstyle="round,pad=0.2", alpha=0.8),
         )
 
     # Group cell types and display each name once
@@ -1289,8 +1329,8 @@ def Heatmap_StateLoadings(Statescope_model, top_genes=None):
 
     # Set x-axis ticks and labels
     ax.set_xticks(xticks)
-    ax.set_xticklabels(xticklabels, fontsize=10, rotation=90, ha='center')
-    ax.tick_params(axis='x', pad=15)  # Adjust the padding to push tick labels further down
+    ax.set_xticklabels(xticklabels, fontsize=10, rotation=90, ha="center")
+    ax.tick_params(axis="x", pad=15)  # Adjust the padding to push tick labels further down
 
     # Adjust layout to ensure proper spacing
     plt.tight_layout(rect=[0, 0, 1, 1])  # Adjust the figure bounding box
@@ -1311,10 +1351,7 @@ def Plot_CopheneticCoefficients(Statescope_model):
     # 0) sanity check                                              #
     # ------------------------------------------------------------ #
     if not getattr(Statescope_model, "CopheneticCoefficients", None):
-        raise AttributeError(
-            "CopheneticCoefficients are not available. "
-            "Run StateDiscovery first."
-        )
+        raise AttributeError("CopheneticCoefficients are not available. Run StateDiscovery first.")
 
     # number of states retained for each cell type, derived from StateScores
     chosen_K = {
@@ -1327,7 +1364,6 @@ def Plot_CopheneticCoefficients(Statescope_model):
     records = []
 
     for ct, coeff_obj in Statescope_model.CopheneticCoefficients.items():
-
         # case A: array-like (list / np.ndarray / pd.Series)
         if isinstance(coeff_obj, (list, np.ndarray, pd.Series)):
             ks = np.arange(2, 2 + len(coeff_obj))
@@ -1345,10 +1381,7 @@ def Plot_CopheneticCoefficients(Statescope_model):
         # add rows
         for k, coef in zip(ks, coeffs):
             records.append(
-                dict(celltype=ct,
-                     k=int(k),
-                     coefficient=coef,
-                     chosen=("Chosen" if k == chosen_K[ct] else "Not Chosen"))
+                dict(celltype=ct, k=int(k), coefficient=coef, chosen=("Chosen" if k == chosen_K[ct] else "Not Chosen"))
             )
 
     plot_df = pd.DataFrame.from_records(records)
@@ -1359,12 +1392,7 @@ def Plot_CopheneticCoefficients(Statescope_model):
     g = sns.FacetGrid(plot_df, col="celltype", sharey=False, height=4, aspect=1.2)
 
     # lines (only appear when ≥2 points for that cell type)
-    g.map_dataframe(
-        sns.lineplot,
-        x="k",
-        y="coefficient",
-        color="black"
-    )
+    g.map_dataframe(sns.lineplot, x="k", y="coefficient", color="black")
 
     # scatter: red = chosen, black = not chosen
     g.map_dataframe(
@@ -1374,16 +1402,14 @@ def Plot_CopheneticCoefficients(Statescope_model):
         hue="chosen",
         palette={"Chosen": "red", "Not Chosen": "black"},
         legend=False,
-        s=50
+        s=50,
     )
 
     g.set_axis_labels("k (number of states)", "Cophenetic coefficient")
     g.fig.tight_layout()
     plt.show()
-    
-    
 
-    
+
 def BarPlot_StateLoadings(Statescope_model, top_genes=1):
     """
     Create a bar plot for cell types and their states, showing coefficients with top genes labeled.
@@ -1400,8 +1426,8 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
     # Prepare data for plotting
     bar_data = []
     for state in state_loadings.columns:
-        cell_type = '_'.join(state.split('_')[:-1])
-        state_number = int(state.split('_')[-1])  # Convert state number to integer
+        cell_type = "_".join(state.split("_")[:-1])
+        state_number = int(state.split("_")[-1])  # Convert state number to integer
         # Get top genes for the state
         top_gene_values = state_loadings[state].nlargest(top_genes)
         for gene, coeff in top_gene_values.items():
@@ -1427,9 +1453,11 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
     # Plot horizontal bar plot
     plt.figure(figsize=(14, 10))
     bars = plt.barh(
-        range(len(bar_df)), bar_df["Coefficient"], 
+        range(len(bar_df)),
+        bar_df["Coefficient"],
         color=[color_map[row["State"]] for _, row in bar_df.iterrows()],
-        edgecolor='black', alpha=0.8
+        edgecolor="black",
+        alpha=0.8,
     )
 
     # Add gene labels to the right of bars
@@ -1438,7 +1466,10 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
             bar.get_width() + 0.01,  # Position slightly beyond the bar
             bar.get_y() + bar.get_height() / 2,
             label,
-            ha='left', va='center', fontsize=9, color='black'
+            ha="left",
+            va="center",
+            fontsize=9,
+            color="black",
         )
 
     # Add labels and title
@@ -1448,27 +1479,26 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
 
     # Customize y-axis ticks and labels with dynamic font size
     plt.yticks(ticks=range(len(bar_df)), labels=y_tick_labels, fontsize=font_size)
-    
+
     # Invert y-axis to display states from top to bottom
     plt.gca().invert_yaxis()
-    
+
     plt.tight_layout()
     plt.show()
 
 
-
-
 def TSNE_AllStates(
-        Statescope_model,
-        *,
-        weighing: str = "Omega",
-        perplexity: int = 5,
-        n_iter: int = 1_000,
-        point_size: int = 80,
-        trim_regex: str = r"[_\|].*$",
-        random_state: int = 42,
-        show_samples: bool | None = None,   # ← NEW
-        sample_fs: int = 6):               # ← font-size when shown
+    Statescope_model,
+    *,
+    weighing: str = "Omega",
+    perplexity: int = 5,
+    n_iter: int = 1_000,
+    point_size: int = 80,
+    trim_regex: str = r"[_\|].*$",
+    random_state: int = 42,
+    show_samples: bool | None = None,  # ← NEW
+    sample_fs: int = 6,
+):  # ← font-size when shown
     """
     Run a t-SNE on all samples, colour by cell type, print the dominant state
     number inside each dot.  Sample names are printed above the dots only when
@@ -1481,14 +1511,14 @@ def TSNE_AllStates(
     :param point_size:       Marker size.
     :param trim_regex:       Regex to shorten sample names when shown.
     :param random_state:     Seed for reproducibility.
-    :param show_samples:     • None/False (default) → hide sample names.  
+    :param show_samples:     • None/False (default) → hide sample names.
                              • True → show sample names above each dot.
     :param sample_fs:        Font size for sample names.
     """
-    
-    Fractions   = Statescope_model.Fractions
-    GEX_all     = Statescope_model.GEX
-    Omega_all   = Statescope_model.Omega
+
+    Fractions = Statescope_model.Fractions
+    GEX_all = Statescope_model.GEX
+    Omega_all = Statescope_model.Omega
     StateScores = Extract_StateScores(Statescope_model)
 
     matrices, labels, states, samples = [], [], [], []
@@ -1502,8 +1532,8 @@ def TSNE_AllStates(
             continue
 
         X = Create_Cluster_Matrix(GEX_all[ct], Omega, Fractions, ct, weighing)
-        X = np.nan_to_num(X)                         # remove NaN / inf
-        X = X[:, X.var(axis=0) > 0]                 # keep informative cols
+        X = np.nan_to_num(X)  # remove NaN / inf
+        X = X[:, X.var(axis=0) > 0]  # keep informative cols
 
         # guarantee ≥2 columns
         if X.shape[1] == 0:
@@ -1514,14 +1544,10 @@ def TSNE_AllStates(
         matrices.append(X)
         labels.extend([ct] * X.shape[0])
 
-        dom_state = (StateScores.filter(regex=f"^{ct}_")
-                                  .idxmax(axis=1)
-                                  .str.split('_').str[-1].astype(int))
+        dom_state = StateScores.filter(regex=f"^{ct}_").idxmax(axis=1).str.split("_").str[-1].astype(int)
         states.extend(dom_state)
 
-        trimmed_samples = (dom_state.index
-                           .to_series()
-                           .str.replace(trim_regex, "", regex=True))
+        trimmed_samples = dom_state.index.to_series().str.replace(trim_regex, "", regex=True)
         samples.extend(trimmed_samples)
 
     if not matrices:
@@ -1532,81 +1558,82 @@ def TSNE_AllStates(
     # 2) pad matrices to equal n_columns, stack                          #
     # ------------------------------------------------------------------ #
     max_cols = max(m.shape[1] for m in matrices)
-    padded   = [np.pad(m, ((0, 0), (0, max_cols - m.shape[1])),
-                       mode="constant") for m in matrices]
+    padded = [np.pad(m, ((0, 0), (0, max_cols - m.shape[1])), mode="constant") for m in matrices]
     combined = np.vstack(padded)
 
     # ------------------------------------------------------------------ #
     # 3) run t-SNE                                                      #
     # ------------------------------------------------------------------ #
     perp = max(1, min(perplexity, combined.shape[0] - 1))
-    tsne = TSNE(n_components=2, init="random",
-                perplexity=perp, n_iter=n_iter,
-                random_state=random_state)
+    tsne = TSNE(n_components=2, init="random", perplexity=perp, n_iter=n_iter, random_state=random_state)
     emb = tsne.fit_transform(combined)
 
     df = pd.DataFrame(emb, columns=["t-SNE1", "t-SNE2"])
-    df["Cell"]   = labels
-    df["State"]  = states
+    df["Cell"] = labels
+    df["State"] = states
     df["Sample"] = samples
 
     # 4) plot ------------------------------------------------------------
-    palette   = sns.color_palette("husl", df["Cell"].nunique())
+    palette = sns.color_palette("husl", df["Cell"].nunique())
     ct_colour = dict(zip(df["Cell"].unique(), palette))
 
     plt.figure(figsize=(12, 9))
     for ct, sub in df.groupby("Cell"):
-        plt.scatter(sub["t-SNE1"], sub["t-SNE2"],
-                    c=[ct_colour[ct]] * len(sub),
-                    s=point_size, alpha=0.7, edgecolor="k",
-                    label=ct)
+        plt.scatter(
+            sub["t-SNE1"], sub["t-SNE2"], c=[ct_colour[ct]] * len(sub), s=point_size, alpha=0.7, edgecolor="k", label=ct
+        )
 
     # state number (always)
     for _, row in df.iterrows():
-        plt.text(row["t-SNE1"], row["t-SNE2"],
-                 str(row["State"]), fontsize=6,
-                 ha="center", va="center", color="white")
+        plt.text(row["t-SNE1"], row["t-SNE2"], str(row["State"]), fontsize=6, ha="center", va="center", color="white")
 
     # sample name (optional)
     if show_samples:
         for _, row in df.iterrows():
-            plt.text(row["t-SNE1"], row["t-SNE2"] + 0.8,
-                     row["Sample"], fontsize=sample_fs,
-                     ha="center", va="bottom", alpha=0.9)
+            plt.text(
+                row["t-SNE1"],
+                row["t-SNE2"] + 0.8,
+                row["Sample"],
+                fontsize=sample_fs,
+                ha="center",
+                va="bottom",
+                alpha=0.9,
+            )
 
     plt.legend(title="Cell Type", bbox_to_anchor=(1.04, 1), loc="upper left")
     plt.title("t-SNE of All Cell Types / States", fontsize=15)
-    plt.xlabel("t-SNE1"); plt.ylabel("t-SNE2")
+    plt.xlabel("t-SNE1")
+    plt.ylabel("t-SNE2")
     plt.tight_layout()
     plt.show()
 
 
-
 def TSNE_CellTypes(
-        Statescope_model,
-        celltype: str | None = None,
-        weighing: str = "Omega",
-        perplexity: int = 5,
-        n_iter: int = 1_000,
-        point_size: int = 150,
-        min_samples: int = 2,
-        random_state: int = 42,
-        *,
-        show_samples: bool = True,
-        sample_fs: int = 6):
+    Statescope_model,
+    celltype: str | None = None,
+    weighing: str = "Omega",
+    perplexity: int = 5,
+    n_iter: int = 1_000,
+    point_size: int = 150,
+    min_samples: int = 2,
+    random_state: int = 42,
+    *,
+    show_samples: bool = True,
+    sample_fs: int = 6,
+):
     """
     Generate a t-SNE scatterplot for one cell type (or every cell type) using
-    its “cluster matrix”.  
+    its “cluster matrix”.
     Each dot is a sample; the dominant state number is printed in the centre
     and, if desired, the sample name is shown just above it.
 
     :param Statescope_model:  A fitted Statescope object containing ``GEX``,
                               ``Omega``, ``Fractions`` and ``StateScores``.
-    :param celltype:          A specific cell type to visualise.  
-                              • ``None`` (default) → plot every cell type.  
+    :param celltype:          A specific cell type to visualise.
+                              • ``None`` (default) → plot every cell type.
                               • *str* → plot only the requested cell type.
     :param weighing:          Transformation applied inside
-                              ``Create_Cluster_Matrix``  
+                              ``Create_Cluster_Matrix``
                               (``'Omega'`` | ``'OmegaFractions'`` |
                               ``'centering'`` | ``'no_weighing'``).
     :param perplexity:        t-SNE perplexity (auto-capped at
@@ -1623,13 +1650,13 @@ def TSNE_CellTypes(
                               ``show_samples=True``.
     """
     # ── shortcuts ─────────────────────────────────────────────────────
-    Omega_all   = Statescope_model.Omega
-    GEX_all     = Statescope_model.GEX
-    Fractions   = Statescope_model.Fractions
+    Omega_all = Statescope_model.Omega
+    GEX_all = Statescope_model.GEX
+    Fractions = Statescope_model.Fractions
     StateScores = Extract_StateScores(Statescope_model)
 
-    all_cts  = list(Omega_all.keys())
-    colors   = sns.color_palette("husl", len(all_cts))
+    all_cts = list(Omega_all.keys())
+    colors = sns.color_palette("husl", len(all_cts))
     ct_color = dict(zip(all_cts, colors))
 
     to_plot = [celltype] if celltype else all_cts
@@ -1640,8 +1667,7 @@ def TSNE_CellTypes(
             continue
 
         # ── build + clean matrix ──────────────────────────────────────
-        mat = Create_Cluster_Matrix(GEX_all[ct], Omega_all[ct],
-                                    Fractions, ct, weighing)
+        mat = Create_Cluster_Matrix(GEX_all[ct], Omega_all[ct], Fractions, ct, weighing)
         mat = np.nan_to_num(mat)
 
         var_mask = mat.var(axis=0) > 0
@@ -1657,42 +1683,35 @@ def TSNE_CellTypes(
             mat = np.hstack([mat, np.zeros((mat.shape[0], 1))])
 
         # ── labels ────────────────────────────────────────────────────
-        dom_state = (StateScores.filter(regex=f"^{ct}_")
-                                .idxmax(axis=1)
-                                .str.split('_').str[-1]
-                                .astype(int)
-                                .reset_index(drop=True))
+        dom_state = (
+            StateScores.filter(regex=f"^{ct}_").idxmax(axis=1).str.split("_").str[-1].astype(int).reset_index(drop=True)
+        )
         sample_names = StateScores.index.to_series().reset_index(drop=True)
 
         # ── t-SNE ─────────────────────────────────────────────────────
         perp = max(1, min(perplexity, mat.shape[0] - 1))
-        tsne = TSNE(n_components=2, init="random",
-                    perplexity=perp, n_iter=n_iter,
-                    random_state=random_state)
+        tsne = TSNE(n_components=2, init="random", perplexity=perp, n_iter=n_iter, random_state=random_state)
         emb = tsne.fit_transform(mat)
 
         df = pd.DataFrame(emb, columns=["t-SNE1", "t-SNE2"])
-        df["state"]  = dom_state
+        df["state"] = dom_state
         df["sample"] = sample_names
 
         # ── plot ─────────────────────────────────────────────────────
         plt.figure(figsize=(8, 7))
-        plt.scatter(df["t-SNE1"], df["t-SNE2"],
-                    c=[ct_color[ct]] * len(df),
-                    s=point_size, alpha=0.7, edgecolor="k")
+        plt.scatter(df["t-SNE1"], df["t-SNE2"], c=[ct_color[ct]] * len(df), s=point_size, alpha=0.7, edgecolor="k")
 
         # state number centred
         for x, y, s in zip(df["t-SNE1"], df["t-SNE2"], df["state"]):
-            plt.text(x, y, str(s), fontsize=6,
-                     ha='center', va='center', color='white')
+            plt.text(x, y, str(s), fontsize=6, ha="center", va="center", color="white")
 
         # sample label a bit above
         if show_samples:
             for x, y, smp in zip(df["t-SNE1"], df["t-SNE2"], df["sample"]):
-                plt.text(x, y + 0.8, smp, fontsize=sample_fs,
-                         ha='center', va='bottom', alpha=0.9)
+                plt.text(x, y + 0.8, smp, fontsize=sample_fs, ha="center", va="bottom", alpha=0.9)
 
         plt.title(f"t-SNE for {ct}", fontsize=14)
-        plt.xlabel("t-SNE1"); plt.ylabel("t-SNE2")
+        plt.xlabel("t-SNE1")
+        plt.ylabel("t-SNE2")
         plt.tight_layout()
         plt.show()
