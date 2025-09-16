@@ -16,10 +16,12 @@ source /appdata/users/P094398/miniconda3/etc/profile.d/conda.sh
 # activate your env
 conda activate /appdata/users/P094398/conda-envs/statescope
 
-# Run (CPU)
+# Run (CPU) with a pre-intialized model
 srun python /net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution_hpc.py \
-  --model-path /net/beegfs/users/P094398/StatescopeDevBranch/src/Test/Data/PseudobulkTest/Test_model1.pkl \
+  --model-path /net/beegfs/users/P094398/StatescopeDevBranch/src/Test/Data/PseudobulkTest/Test_model1.pkl \ 
   --backend cpu \
   --nrep 100 --njobs 32 \
   --iter-max 1000 \
   --out-dir /net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/Output
+
+  
