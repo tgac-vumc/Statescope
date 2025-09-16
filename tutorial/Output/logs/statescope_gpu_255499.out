@@ -1,3 +1,0 @@
-[info] Backend: GPU
-
-[bench] n_samples=8 | iter_max=50 | Nrep=1 | Njob=4 | tpj=1

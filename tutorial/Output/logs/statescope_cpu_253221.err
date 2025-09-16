@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution_hpc.py", line 59, in <module>
-    from Statescope.Statescope import Initialize_Statescope, Statescope
-ModuleNotFoundError: No module named 'Statescope'
-srun: error: worker08: task 0: Exited with exit code 1
-/var/spool/slurmd/job253221/slurm_script: line 25: --out-dir: command not found

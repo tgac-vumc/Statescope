@@ -1,6 +1,0 @@
-[info] Backend: GPU
-
-[bench] n_samples=8 | iter_max=50 | Nrep=1 | Njob=4 | tpj=1
-Number of common markers between Bulk and Signature: 20
-Number of genes common between Bulk and Signature: 200
-No prior knowledge of expected cell type fractions is given.

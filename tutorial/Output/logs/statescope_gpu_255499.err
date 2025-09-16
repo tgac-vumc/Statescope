@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/net/beegfs/users/P094398/StatescopeDevBranch/src/Test/TimeComplexity.py", line 197, in <module>
-    main()
-  File "/net/beegfs/users/P094398/StatescopeDevBranch/src/Test/TimeComplexity.py", line 134, in main
-    model = Initialize_Statescope(Bulk, Signature=Signature)
-NameError: name 'Initialize_Statescope' is not defined

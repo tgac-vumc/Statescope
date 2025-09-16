@@ -1,9 +1,0 @@
-
-CondaError: Run 'conda init' before 'conda activate'
-
-Traceback (most recent call last):
-srun: error: worker09: task 0: Exited with exit code 1
-  File "/net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution_hpc.py", line 47, in <module>
-    import numpy as np
-ModuleNotFoundError: No module named 'numpy'
-/var/spool/slurmd/job253218/slurm_script: line 22: --out-dir: command not found

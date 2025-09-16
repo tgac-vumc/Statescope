@@ -1,3 +1,0 @@
-/appdata/users/P094398/conda-envs/statescope/bin/python: can't open file '/net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution.py': [Errno 2] No such file or directory
-srun: error: gpu03: task 0: Exited with exit code 2
-/var/spool/slurmd/job253289/slurm_script: line 25: --iter-max: command not found
