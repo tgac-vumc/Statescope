@@ -1,0 +1,14 @@
+[Parallel(n_jobs=32)]: Using backend LokyBackend with 32 concurrent workers.
+[Parallel(n_jobs=32)]: Done   1 tasks      | elapsed:    2.1s
+[Parallel(n_jobs=32)]: Done   3 out of  24 | elapsed:    2.1s remaining:   14.7s
+[Parallel(n_jobs=32)]: Done   6 out of  24 | elapsed:    2.2s remaining:    6.7s
+[Parallel(n_jobs=32)]: Done   9 out of  24 | elapsed:    2.4s remaining:    3.9s
+[Parallel(n_jobs=32)]: Done  12 out of  24 | elapsed:    2.5s remaining:    2.5s
+[Parallel(n_jobs=32)]: Done  15 out of  24 | elapsed:    2.5s remaining:    1.5s
+[Parallel(n_jobs=32)]: Done  18 out of  24 | elapsed:    2.6s remaining:    0.9s
+[Parallel(n_jobs=32)]: Done  21 out of  24 | elapsed:    2.7s remaining:    0.4s
+[Parallel(n_jobs=32)]: Done  24 out of  24 | elapsed:    2.9s finished
+[Parallel(n_jobs=32)]: Using backend LokyBackend with 32 concurrent workers.
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd-worker09: error: *** STEP 253237.0 ON worker09 CANCELLED AT 2025-09-15T16:11:05 ***
+slurmstepd-worker09: error: *** JOB 253237 ON worker09 CANCELLED AT 2025-09-15T16:11:05 ***

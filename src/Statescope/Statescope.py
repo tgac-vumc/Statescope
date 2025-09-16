@@ -30,7 +30,7 @@ Statescope_model.StateDiscovery()
 from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
-from BLADE_Deconvolution.BLADE_lite import Framework_Iterative,Purify_AllGenes
+from BLADE_Deconvolution.BLADEpro import Framework_Iterative,Purify_AllGenes
 from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
@@ -322,7 +322,7 @@ class Statescope:
         self, Ind_Marker=None,
         Alpha=1, Alpha0=1000, Kappa0=1, sY=1,
         Nrep=10, Njob=10, fsel=0, Update_SigmaY=False, Init_Trust=10,
-        Expectation=None, Temperature=None, IterMax=100,
+        Expectation=None, Temperature=None, IterMax=1000,
         *, warm_start: bool = True,
         adam_params: dict = None,   # NEW
         lbfgs_params: dict = None,  # NEW
@@ -373,7 +373,6 @@ class Statescope:
             self.Fractions : pd.DataFrame (posterior fractions)
         """
 
-    
         # Prepare Signature with markers only
         scExp_marker = self.scExp.loc[self.Markers,:].to_numpy()
         scVar_marker = self.scVar.loc[self.Markers, :].to_numpy()
@@ -399,8 +398,8 @@ class Statescope:
                 adam_params=adam_params,
                 lbfgs_params=lbfgs_params,
                 backend=backend,                    # <- NEW
-                threads_per_job=threads_per_job     # <- NEW
-            )
+                threads_per_job=threads_per_job)     # <- NEW
+            
 
                                                             # Save BLADE result in Statescope object
         self.BLADE = final_obj

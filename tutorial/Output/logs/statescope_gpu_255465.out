@@ -1,0 +1,12 @@
+[info] Loading model: /net/beegfs/users/P094398/StatescopeDevBranch/src/Test/Data/PseudobulkTest/Test_model1.pkl
+Loaded Statescope [file:CPU-portable] on cpu
+[info] Backend: GPU
+No prior knowledge of expected cell type fractions is given.
+[Framework] GPU mode: 4 workers over 4 GPUs; threads/job=1.
+start optimization using marker genes: 553 genes out of 553 genes.
+Initialization with Support vector regression
+Deconvolution completed successfully.
+Model converged.
+Saved Statescope → /net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/Output/statescope_model2.pkl (format: CPU-portable)
+[done] Saved model: /net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/Output/statescope_model2.pkl
+[done] Saved fractions: /net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/Output/fractions2.csv

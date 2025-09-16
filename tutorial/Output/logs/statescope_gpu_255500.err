@@ -1,0 +1,12 @@
+/net/beegfs/users/P094398/StatescopeDevBranch/src/Statescope/Statescope.py:807: UserWarning: The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.
+  warnings.warn('The supplied Bulk matrix is assumed to be raw counts. Library size correction to 10k counts per sample is performed.')
+Traceback (most recent call last):
+  File "/net/beegfs/users/P094398/StatescopeDevBranch/src/Test/TimeComplexity.py", line 197, in <module>
+    main()
+  File "/net/beegfs/users/P094398/StatescopeDevBranch/src/Test/TimeComplexity.py", line 138, in main
+    model.Deconvolution(
+  File "/net/beegfs/users/P094398/StatescopeDevBranch/src/Statescope/Statescope.py", line 393, in Deconvolution
+    final_obj, best_obj, best_set, outs = Framework_Iterative(
+  File "/net/beegfs/users/P094398/StatescopeDevBranch/src/BLADE_Deconvolution/BLADEpro.py", line 1807, in Framework_Iterative
+    X_small    = X[Ind_Marker, :]
+IndexError: boolean index did not match indexed array along dimension 0; dimension is 20 but corresponding boolean dimension is 200

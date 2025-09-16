@@ -1,0 +1,14 @@
+usage: run_deconvolution_hpc.py [-h]
+                                (--model-path MODEL_PATH | --adata ADATA | --signature-csv SIGNATURE_CSV)
+                                [--bulk-csv BULK_CSV]
+                                [--celltype-key CELLTYPE_KEY]
+                                [--expectation-csv EXPECTATION_CSV]
+                                [--backend {auto,cpu,gpu}] [--nrep NREP]
+                                [--njobs NJOBS]
+                                [--threads-per-job THREADS_PER_JOB]
+                                [--iter-max ITER_MAX] --out-dir OUT_DIR
+                                [--save-model SAVE_MODEL]
+                                [--save-fractions SAVE_FRACTIONS]
+run_deconvolution_hpc.py: error: the following arguments are required: --out-dir
+srun: error: worker09: task 0: Exited with exit code 2
+/var/spool/slurmd/job253225/slurm_script: line 25: --out-dir: command not found

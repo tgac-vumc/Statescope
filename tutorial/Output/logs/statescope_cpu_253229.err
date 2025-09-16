@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution_hpc.py", line 188, in <module>
+    main()
+  File "/net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution_hpc.py", line 170, in main
+    threads_per_job=args.threads-per-job,  # NOTE: Statescope expects 'threads_per_job'
+AttributeError: 'Namespace' object has no attribute 'threads'
+srun: error: worker09: task 0: Exited with exit code 1

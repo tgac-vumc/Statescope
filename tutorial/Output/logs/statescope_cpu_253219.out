@@ -1,0 +1,13 @@
+no change     /appdata/users/P094398/miniconda3/condabin/conda
+no change     /appdata/users/P094398/miniconda3/bin/conda
+no change     /appdata/users/P094398/miniconda3/bin/conda-env
+no change     /appdata/users/P094398/miniconda3/bin/activate
+no change     /appdata/users/P094398/miniconda3/bin/deactivate
+no change     /appdata/users/P094398/miniconda3/etc/profile.d/conda.sh
+no change     /appdata/users/P094398/miniconda3/etc/fish/conf.d/conda.fish
+no change     /appdata/users/P094398/miniconda3/shell/condabin/Conda.psm1
+no change     /appdata/users/P094398/miniconda3/shell/condabin/conda-hook.ps1
+no change     /appdata/users/P094398/miniconda3/lib/python3.13/site-packages/xontrib/conda.xsh
+no change     /appdata/users/P094398/miniconda3/etc/profile.d/conda.csh
+no change     /home/P094398/.bashrc
+No action taken.

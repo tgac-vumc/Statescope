@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/net/beegfs/users/P094398/Statescopedeployment/Statescope/tutorial/run_deconvolution_hpc.py", line 58, in <module>
+    from BLADE_Deconvolution.BLADE_lite import BLADE
+ModuleNotFoundError: No module named 'BLADE_Deconvolution.BLADE_lite'
+srun: error: worker09: task 0: Exited with exit code 1
+/var/spool/slurmd/job253224/slurm_script: line 25: --out-dir: command not found
