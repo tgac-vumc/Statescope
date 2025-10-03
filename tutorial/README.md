@@ -5,7 +5,31 @@ This file lists the **knobs you can change** when things go wrong.
 
 ---
 
-## 🔥 Slow convergence
+## Save and Load
+
+### Save
+
+Specify whether to save to CPU or GPU state.
+
+```python
+model.save("/path/to/model.pkl", to_cpu=True)   # save with CPU tensors
+model.save("/path/to/model.pkl", to_cpu=False)  # save with GPU tensors
+```
+
+### Load
+
+If the model was saved in a previous version, you may need to pass the `blade_class`.
+
+```python
+from BLADE_Deconvolution.BLADE import BLADE
+
+model = Statescope.load(
+    "/path/to/model.pkl",
+    blade_class=BLADE
+)
+```
+
+## Slow convergence
 
 ```python
 warm_start=True | False        # toggle Adam warm-up before L-BFGS
@@ -17,7 +41,7 @@ Nrep=more                      # more restarts
 
 ---
 
-## ⚠️ Non-finite ELBO
+## Non-finite ELBO
 
 ```python
 lbfgs_params["lr"] = lower
@@ -28,7 +52,7 @@ Expectation[...] = NaN or (0,1)     # never exact 0 or 1
 
 ---
 
-## 💥 CUDA OOM
+## CUDA OOM
 
 Set an **expected VRAM per rep (GiB)** in `lbfgs_params`:
 
@@ -54,7 +78,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ---
 
-## 🔄 Backend
+## Backend
 
 ```python
 backend="cpu" | "gpu" | "auto"
@@ -62,7 +86,7 @@ backend="cpu" | "gpu" | "auto"
 
 ---
 
-## 🧩 Priors
+## Priors
 
 ```python
 Expectation = pd.DataFrame(np.nan, index=model.Samples, columns=model.Celltypes)
@@ -71,7 +95,7 @@ Expectation["T cell"] = [0.3, 0.25, 0.4]  # fill known priors
 
 ---
 
-## ⚙️ Optimizer dicts
+## Optimizer dicts
 
 ```python
 adam_params = {
@@ -98,10 +122,13 @@ model.Deconvolution(adam_params=adam_params, lbfgs_params=lbfgs_params)
 
 ---
 
-## 📊 Check VRAM
+## Check VRAM
 
 ```python
 used = torch.cuda.max_memory_allocated()/(1024**3)
 print(f"peak VRAM ≈ {used:.2f} GiB")
 ```
+
+---
+
 
