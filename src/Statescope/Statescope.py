@@ -319,7 +319,7 @@ class Statescope:
         Temperature=None,
         IterMax=1000,
         *,
-        warm_start: bool = True,
+        warm_start: bool = False,
         adam_params: dict = None,  # NEW
         lbfgs_params: dict = None,  # NEW
         backend: str = "auto",  # NEW: "auto" | "gpu" | "cpu"
@@ -869,10 +869,8 @@ def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=No
             )
 
         temp = np.matmul(group_expect, group_mat)
-
         if (temp == 0).any():
             raise ValueError("The Expectation contains 0 which is not allowed. Use a small value like 0.01.")
-
         if (temp == 1).any():
             raise ValueError("The Expectation contains 1 which is not allowed. Use a large value like 0.99.")
 
@@ -880,23 +878,39 @@ def Check_Expectation_validity(Expectation, celltype_order=None, sample_names=No
         return Expectation
 
     elif isinstance(Expectation, pd.DataFrame):
+        # --- enforce column order ---
         if celltype_order is not None:
             missing_cts = [ct for ct in celltype_order if ct not in Expectation.columns]
             if missing_cts:
                 raise ValueError(f"Missing cell types in Expectation: {missing_cts}")
             Expectation = Expectation[celltype_order]
 
+        # --- enforce sample order ---
+        if sample_names is not None:
+            missing_samples = [s for s in sample_names if s not in Expectation.index]
+            if missing_samples:
+                raise ValueError(f"Missing samples in Expectation: {missing_samples}")
+            Expectation = Expectation.loc[sample_names, :]
+
         if (Expectation == 0).any().any():
             raise ValueError("The Expectation contains 0 which is not allowed. Use a small value like 0.01.")
-
         if (Expectation == 1).any().any():
             raise ValueError("The Expectation contains 1 which is not allowed. Use a large value like 0.99.")
 
+        # --- final shape check ---
+        if sample_names is not None and celltype_order is not None:
+            if Expectation.shape != (len(sample_names), len(celltype_order)):
+                raise ValueError(
+                    f"Expectation shape {Expectation.shape} does not match "
+                    f"(Nsample={len(sample_names)}, Ncell={len(celltype_order)})"
+                )
+
         print("Celltype-level prior knowledge is utilised in refining fraction estimates.")
-        return Expectation.to_numpy()
+        return Expectation   #  keep as DataFrame
 
     else:
         raise ValueError("Expectation must be a dict or a pandas DataFrame.")
+
 
 
 def fetch_signature(tumor_type, n_celltypes):
