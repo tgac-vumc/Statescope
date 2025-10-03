@@ -1,6 +1,11 @@
+Got it ✅ — the issue is likely because of mixing Markdown headers, text, and fenced code blocks.
+Here’s a **cleaned Markdown version** you can paste directly into a README.md (GitHub/Markdown renderer will format correctly with headers, code boxes, etc.):
+
+````markdown
 # Statescope Deconvolution — Troubleshooting
 
 This file lists the **knobs you can change** when things go wrong.
+
 ---
 
 ## 🔥 Slow convergence
@@ -11,7 +16,7 @@ IterMax=2000                   # increase iterations
 lbfgs_params["lr"] = 0.01–0.1  # adjust learning rate
 adam_params["lr"] = 1e-3–1e-4
 Nrep=more                      # more restarts
-```
+````
 
 ---
 
@@ -94,7 +99,10 @@ Pass them:
 model.Deconvolution(adam_params=adam_params, lbfgs_params=lbfgs_params)
 ```
 
-Check Vram
+---
+
+## 📊 Check VRAM
+
 ```python
 used = torch.cuda.max_memory_allocated()/(1024**3)
 print(f"peak VRAM ≈ {used:.2f} GiB")
