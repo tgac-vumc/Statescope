@@ -1,4 +1,5 @@
 import os
+from termios import B0
 
 # Disable CUDA graphs in Inductor — safer under multi-thread/multi-proc joblib
 os.environ.setdefault("TORCHINDUCTOR_CUDAGRAPHS", "0")
@@ -22,6 +23,8 @@ from scipy.special import loggamma
 from scipy.special import gamma
 from scipy.special import digamma
 from scipy.special import polygamma
+
+import pandas as pd
 
 from sklearn.svm import NuSVR
 from sklearn.metrics import mean_squared_error as mse
@@ -415,11 +418,11 @@ def grad_Nu_C(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, Nce
 
     EPS = 1e-12
 
-    # ---------- 1) grad_PX (same math as your original) ----------
+    # ---------- 1) grad_PX ----------
     AlphaN = Alpha0 + S * 0.5
     NuExp = torch.sum(Nu, dim=0) / S  # (G,C)
 
-    # Accumulator for ExpBetaN (exact same formula, vectorized)
+    # Accumulator for ExpBetaN (vectorized)
     ExpBetaN = Beta0 + (S - 1) / 2 * Omega.square()
     ExpBetaN += Kappa0 * S / (2 * (Kappa0 + S)) * (Omega.square() / S + (NuExp - Mu0).square())
     ExpBetaN += 0.5 * torch.sum((Nu - NuExp).square(), dim=0)  # (G,C)
@@ -449,7 +452,7 @@ def grad_Nu_C(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, Nce
     Exp = ExpQ_C(Nu, Beta, Omega)  # (G,S)
     Var = VarQ_C(Nu, Beta, Omega, G, C, S)  # (G,S)
 
-    # ---------- 5) g_Exp wrt Nu (same as your code, just vectorized) ----------
+    # ---------- 5) g_Exp wrt Nu ----------
     # d E[X] / d Nu = E[X]; multiply by mu to match weighting
     g_Exp = (v * mu.unsqueeze(1)).permute(1, 2, 0)  # (G,C,S)
 
@@ -472,7 +475,7 @@ def grad_Nu_C(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, Nce
 
     g_Var = g_Var_main + CovTerm_GCS  # (G,C,S)
 
-    # ---------- 7) Assemble a, b, grad_PY (same formulas as your code) ----------
+    # ---------- 7) Assemble a, b, grad_PY  ----------
     Exp_g1S = Exp.unsqueeze(1)  # (G,1,S)
 
     # a[g,c,s] = ( g_Var - 2 * g_Exp * Var/Exp ) / Exp^2
@@ -537,11 +540,11 @@ def grad_Omega_C(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, 
     def _bmm_sum_over_c(W_sc, M_sgc):
         return torch.bmm(W_sc.unsqueeze(1), M_sgc.transpose(1, 2).contiguous()).squeeze(1)  # (S,G)
 
-    # -------- 4) Expectation/variance of Q (as in your pipeline) --------
+    # -------- 4) Expectation/variance of Q  --------
     Exp = ExpQ_C(Nu, Beta, Omega)  # (G,S)
     Var = VarQ_C(Nu, Beta, Omega, G, C, S)  # (G,S)
 
-    # -------- 5) g_Exp term (same as your code, but vectorized) --------
+    # -------- 5) g_Exp term (vectorized) --------
     # g_Exp[g,c,s] = E[X]_{s,g,c} * mu_{s,c} * Omega_{g,c}
     g_Exp = (v * mu.unsqueeze(1) * Omega.unsqueeze(0)).permute(1, 2, 0)  # (G,C,S)
 
@@ -584,10 +587,10 @@ def grad_Omega_C(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, 
     # grad_PY[g,c] = sum_s -0.5 / SigmaY[g,s]^2 * (a[g,c,s] + b[g,c,s])
     grad_PY = torch.sum(-0.5 / SigmaY.square().unsqueeze(1) * (a + b), dim=2)  # (G,C)
 
-    # -------- 9) Q(X) term (same as original) --------
+    # -------- 9) Q(X) term --------
     grad_QX = -S / Omega  # (G,C)
 
-    # -------- 10) Final combine (same scaling by weight) --------
+    # -------- 10) Final combine  --------
     return grad_PX * (1.0 / weight) + grad_PY - grad_QX * (1.0 / weight)
 
 
@@ -599,20 +602,20 @@ def g_Exp_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample):
     ExpX = ExpX * torch.exp(0.5 * torch.square(Omega)).unsqueeze(0)
 
     # B0mat computation (element-wise division)
-    B0mat = Beta / torch.square(B0.unsqueeze(1))  # Shape: (Nsample, Ncell)
+    B0mat = Beta / torch.square(B0.unsqueeze(1)).clamp_min(1e-12)  # Shape: (Nsample, Ncell)
 
-    # Transpose ExpX to match the original NumPy (Nsample, Ncell, Ngene)
     tExpX = ExpX.transpose(1, 2)  # Shape: (Nsample, Ncell, Ngene)
 
     # Perform dot product of B0mat and tExpX
     B0mat = torch.matmul(B0mat.unsqueeze(1), tExpX).squeeze(1)  # Shape: (Nsample, 1, Ngene)
 
-    # Divide ExpX by the broadcasted B0 (shape should match (Nsample, Ngene, Ncell))
-    g_Exp = ExpX / B0.unsqueeze(1).unsqueeze(2)  # Shape: (Nsample, Ngene, Ncell)
+    g_Exp = torch.empty((Nsample, Ncell, Ngene), dtype=Nu.dtype, device=Nu.device)
 
-    # Subtract B0mat which has shape (Nsample, Ngene), broadcast it over Ncell
-    g_Exp = g_Exp - B0mat.unsqueeze(2)  # Shape: (Nsample, Ngene, Ncell)
-    return g_Exp.permute(0, 2, 1)
+# Explicit loop to match legacy semantics
+    for c in range(Ncell):
+        g_Exp[:, c, :] = (ExpX[:, :, c] / B0.unsqueeze(1)) - B0mat
+
+    return g_Exp
 
 
 # @torch_prof
@@ -687,52 +690,51 @@ def g_Var_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample):
 
 # @torch_prof
 def g_PY_Beta_C(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
-    # 1) Compute Exp, Var (shapes: (Ngene, Nsample))
-    Exp = ExpQ_C(Nu, Beta, Omega)
-    Var = VarQ_C(Nu, Beta, Omega, Ngene, Ncell, Nsample)
+    EPS = 1e-12  
 
-    # 2) Compute g_Exp, g_Var (shapes: (Nsample, Ncell, Ngene))
-    g_Exp = g_Exp_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)
-    g_Var = g_Var_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)
+    Exp = ExpQ_C(Nu, Beta, Omega)              # (G,S)
+    Var = VarQ_C(Nu, Beta, Omega, Ngene, Ncell, Nsample)  # (G,S)
 
-    # 3) "a" term
-    #    a[s,c,g] = (g_Var[s,c,g]*Exp[g,s] - 2*g_Exp[s,c,g]*Var[g,s]) / Exp[g,s]^3
-    #
-    # We reorder Exp->(Nsample,Ngene) so it can broadcast with (Nsample,Ncell,Ngene).
-    Exp_t = Exp.permute(1, 0)  # (Nsample, Ngene)
-    Var_t = Var.permute(1, 0)  # (Nsample, Ngene)
+    # 2) grads
+    g_Exp = g_Exp_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)  # (S,C,G)
+    g_Var = g_Var_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)  # (S,C,G)
+
+    # --- clamp denominators to avoid huge broadcasts into irrelevant CTs ---
+    Exp_safe = Exp.clamp_min(EPS)              # (G,S)
+    Var_safe = Var                              # (G,S)  (usually okay)
+    SigmaY_safe = SigmaY.clamp_min(EPS)        # (G,S)
+
+    # 3) a-term
+    Exp_t = Exp_safe.permute(1, 0)             # (S,G)
+    Var_t = Var_safe.permute(1, 0)             # (S,G)
 
     numerator = g_Var * Exp_t.unsqueeze(1) - 2.0 * g_Exp * Var_t.unsqueeze(1)
-    denominator = Exp_t.unsqueeze(1).pow(3)  # Exp[g,s]^3
-    a = numerator / denominator  # (Nsample, Ncell, Ngene)
+    denom = Exp_t.unsqueeze(1).clamp_min(EPS).pow(3)  # (S,1,G)
+    a = numerator / denom                         # (S,C,G)
 
-    # 4) "b" term
-    #    varExp2[g,s] = Var[g,s]/(2 * Exp[g,s]^2)
-    #    b[s,c,g]     = - (Y[g,s] - log(Exp[g,s]) - varExp2[g,s])
-    #                     * [2*g_Exp[s,c,g]/Exp[g,s] + a[s,c,g]]
-    #
-    varExp2 = Var / (2.0 * Exp.square())  # (Ngene, Nsample)
-    varExp2_t = varExp2.permute(1, 0)  # (Nsample, Ngene)
+    # 4) b-term
+    varExp2 = Var_safe / (2.0 * Exp_safe.square())  # (G,S)
+    varExp2_t = varExp2.permute(1, 0)               # (S,G)
 
-    Y_t = Y.permute(1, 0)  # (Nsample, Ngene)
-    logExp_t = torch.log(Exp).permute(1, 0)  # (Nsample, Ngene)
+    Y_t = Y.permute(1, 0)                           # (S,G)
+    logExp_t = torch.log(Exp_safe).permute(1, 0)    # (S,G)  <- log on clamped Exp
 
-    two_gExp_over_Exp = 2.0 * g_Exp / Exp_t.unsqueeze(1)
+    two_gExp_over_Exp = 2.0 * g_Exp / Exp_t.unsqueeze(1).clamp_min(EPS)
     inside = two_gExp_over_Exp + a
 
     diff = Y_t.unsqueeze(1) - logExp_t.unsqueeze(1) - varExp2_t.unsqueeze(1)
-    b = -diff * inside  # (Nsample, Ncell, Ngene)
+    b = -diff * inside                              # (S,C,G)
 
-    # 5) Combine (a + b), multiply by (0.5 / SigmaY^2), sum over gene
+    # 5) sum over genes with safe SigmaY
     sum_ab = a + b
-    SigmaY_sq = SigmaY.square()  # (Ngene, Nsample)
-    SigmaY_sq_t = SigmaY_sq.permute(1, 0).unsqueeze(1)  # (Nsample, 1, Ngene)
+    SigmaY_sq_t = SigmaY_safe.square().permute(1, 0).unsqueeze(1)  # (S,1,G)
 
-    factor = 0.5 / SigmaY_sq_t
-    weighted_sum_ab = factor * sum_ab  # (Nsample, Ncell, Ngene)
-    grad_PY = -torch.sum(weighted_sum_ab, dim=2)  # sum over gene => (Nsample, Ncell)
+    factor = 0.5 / SigmaY_sq_t.clamp_min(EPS)
+    weighted_sum_ab = factor * sum_ab
+    grad_PY = -torch.sum(weighted_sum_ab, dim=2)     # (S,C)
 
     return grad_PY
+
 
 
 from dataclasses import dataclass, field
@@ -1057,66 +1059,53 @@ class BLADE:
 
     # @torch_prof
     def grad_Beta(self, Nu, Omega, Beta):
-        # 1. B0 is sum of Beta along cells
-        B0 = torch.sum(self.Beta, dim=1)  # shape: (Nsample,)
+        # 1) Row sums
+        B0 = torch.sum(self.Beta, dim=1)  # (Nsample,)
 
-        # 2. Compute grad_PY
-        grad_PY = g_PY_Beta_C(Nu, Beta, Omega, self.Y, self.SigmaY, B0, self.Ngene, self.Ncell, self.Nsample)
-        # print(grad_PY, "grad_PY")
-        # 3. Compute grad_PF
-        polygamma_Beta = torch.special.polygamma(1, Beta)  # (Nsample, Ncell)
-        polygamma_B0 = torch.special.polygamma(1, B0).unsqueeze(1)  # (Nsample, 1)
+        # 2) Likelihood piece d/dBeta E[log P(Y|X,F)]
+        grad_PY = g_PY_Beta_C(
+            Nu, Beta, Omega, self.Y, self.SigmaY, B0,
+            self.Ngene, self.Ncell, self.Nsample
+        )  # (Nsample, Ncell)
 
-        grad_PF = (self.Alpha - 1) * polygamma_Beta - torch.sum((self.Alpha - 1) * polygamma_B0, dim=1, keepdim=True)
+        # 3) Prior piece d/dBeta E[log P(F)]
+        polygamma_Beta = torch.special.polygamma(1, Beta)          # (S,C)
+        polygamma_B0   = torch.special.polygamma(1, B0).unsqueeze(1)  # (S,1)
+        
+        grad_PF = (self.Alpha - 1) * polygamma_Beta \
+                - torch.sum((self.Alpha - 1) * polygamma_B0, dim=1, keepdim=True)
 
-        # print(grad_PF, "grad_PF")
+        psi_Beta = torch.special.digamma(Beta)          # (S,C)
+        psi_B0   = torch.special.digamma(B0).unsqueeze(1)  # (S,1)
 
-        # 4. Compute grad_QF
-        grad_QF = (Beta - 1) * polygamma_Beta - torch.sum((Beta - 1) * polygamma_B0, dim=1, keepdim=True)
+        grad_QF = (Beta - 1) * polygamma_Beta \
+        - torch.sum((Beta - 1), dim=1, keepdim=True) * polygamma_B0 
+        # - (psi_Beta - psi_B0)   # <-- extra term
 
-        # print(grad_QF, "grad_QF")
+        # 5) Match E_step weighting: PF and QF are scaled by sqrt(Ngene/Ncell)
+        scale = torch.sqrt(torch.tensor(self.Ngene / self.Ncell, dtype=Beta.dtype, device=Beta.device))
 
-        # 5. Combine everything (same final scaling as in NumPy code)
-        scaling_factor = torch.sqrt(torch.tensor(self.Ngene / self.Ncell, dtype=Beta.dtype, device=Beta.device))
+        # Optional safety if Beta can get tiny: (you already clamp in _finite_clamp_)
+        # Beta_clamped = Beta.clamp_min(1e-7)
 
-        # print(grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor, "grad_Beta")
-
-        return grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor
+        return grad_PY + grad_PF - grad_QF 
 
     # @torch_prof
     # E step
     def E_step(self, Nu, Beta, Omega):
         PX = self.Estep_PX(Nu, Omega) * (1 / self.weight)
         PY = self.Estep_PY(Nu, Omega, Beta)
-        PF = self.Estep_PF(Beta) * np.sqrt(self.Ngene / self.Ncell)
+        PF = self.Estep_PF(Beta) 
         QX = self.Estep_QX(Omega) * (1 / self.weight)
-        QF = self.Estep_QF(Beta) * np.sqrt(self.Ngene / self.Ncell)
+        QF = self.Estep_QF(Beta) 
         return PX + PY + PF - QX - QF
 
     def _finite_clamp_(self):
-        """Project to SciPy L-BFGS-B–equivalent box constraints and scrub non-finite.
-        Match old numpy optimizer: Nu unbounded; Omega,Beta in [1e-7, 100].
-        """
         with torch.no_grad():
-
-             # 1) Scrub non-finite entries
-            for p in (self.Nu, self.Omega, self.Beta):
-                if isinstance(p, torch.Tensor):
-                    bad = ~torch.isfinite(p)
-                    if bad.any():
-                        # Replace by a safe neutral value:
-                        # - Nu: 0 (old code allowed any real; 0 keeps exp stable)
-                        # - Omega/Beta: mid of the box (or 1.0) then clamped below
-                        fill = 0.0 if p is self.Nu else 1.0
-                        p[bad] = fill
-
             if isinstance(self.Omega, torch.Tensor):
                 self.Omega.clamp_(min=1e-7, max=100.0)
             if isinstance(self.Beta, torch.Tensor):
                 self.Beta.clamp_(min=1e-7, max=100.0)
-
-            # 3) Do NOT clamp Nu (unbounded in the old SciPy version)
-            #    (We rely on internal exp-guards like EXP_MAX inside math kernels.)
 
     def _analytical_grads_(self):
         """Fill .grad with negative ascent direction (PyTorch optimizers minimize)."""
@@ -1167,8 +1156,8 @@ class BLADE:
         amp_grads = bool(opt_kwargs.pop("amp_grads", True))
         amp_ctx = _amp_autocast_grad(enabled=amp_grads, dtype=torch.bfloat16)
 
-        # --- 0) make sure starting point is sane (once) ---
-        self._finite_clamp_()
+        # # --- 0) make sure starting point is sane ---
+        # self._finite_clamp_()
 
         # --- 1) prepare trainables respecting Fix_par ---
         trainable = []
@@ -1371,196 +1360,65 @@ class BLADE:
             warnings.warn("Zero or negative values in Kappa0", Warning, stacklevel=2)
 
 
-    def Update_Alpha_Group(
-        self,
-        Expected=None,
-        mean_blend: float = 0.35,
-        base_conc: float | None = None,
-        floor_eps: float = 1e-3,
-        kl_target="auto",             # tuple or "auto"
-        kl_scale=(0.25, 0.75),        # when auto: lo = s0*KL0, hi = s1*KL0
-        max_adjust_steps: int = 3,
-    ):
-        """
-        Dataset-agnostic α update with optional AUTO KL target:
-        - mean_blend ∈ [0,1]: 0=use only global mean, 1=use only per-sample Beta
-        - fixed concentration (row-sum) with a small floor
-        - KL feedback to keep priors in a stable band
-        """
 
-        eps = 1e-12
-        C = int(self.Ncell)
-        conc = float(base_conc if base_conc is not None else C)
+    def Update_Alpha_Group(self, Expected=None, Temperature=None):
+        # Average concentration over all samples
+        AvgBeta = torch.mean(self.Beta, dim=0)
+        Fraction_Avg = AvgBeta / torch.sum(AvgBeta)
 
-        with torch.no_grad():
-            # seeds = current per-sample means (row-normalized Beta)
-            F = self.Beta.clamp_min(1e-12)
-            F = F / F.sum(dim=1, keepdim=True)
-
-            # global mean
-            AvgBeta = self.Beta.mean(dim=0)
-            m_global = AvgBeta / AvgBeta.sum().clamp_min(eps)
-
-            # blended per-sample mean + tiny floor
-            m = (1.0 - mean_blend) * m_global.unsqueeze(0).expand_as(F) + mean_blend * F
-            m = m + float(floor_eps)
-            m = m / m.sum(dim=1, keepdim=True).clamp_min(eps)
-
-            # satisfy Expected (if provided)
-            if Expected is not None:
-                if isinstance(Expected, dict):
-                    G = Expected.get("Group", torch.eye(Expected["Expectation"].shape[1], device=self.device))
-                    E = Expected["Expectation"]
-                else:
-                    G = torch.eye(Expected.shape[1], device=self.device)
-                    E = Expected
-                G = torch.as_tensor(G, device=self.device, dtype=torch.float32)
-                E = torch.as_tensor(E, device=self.device, dtype=torch.float32)
-
-                all_idx = torch.arange(C, device=self.device)
-                for s in range(self.Nsample):
-                    frac = m[s].clone()
-                    IndG = torch.where(~torch.isnan(E[s]))[0]
-                    used = []
-                    for g in IndG:
-                        cells = torch.where(G[g] == 1)[0]
-                        denom = frac[cells].sum().clamp_min(eps)
-                        frac[cells] = frac[cells] / denom * E[s, g]
-                        used.extend(cells.tolist())
-                    mask = torch.ones(C, dtype=torch.bool, device=self.device)
-                    if used:
-                        mask[torch.tensor(used, device=self.device)] = False
-                    rest = all_idx[mask]
-                    remaining = 1.0 - (E[s, IndG].sum() if IndG.numel() else 0.0)
-                    remaining = remaining.clamp(0.0, 1.0)
-                    if rest.numel() > 0:
-                        denom_rest = frac[rest].sum().clamp_min(eps)
-                        frac[rest] = frac[rest] / denom_rest * remaining
-                    m[s] = frac / frac.sum().clamp_min(eps)
-
-            # initial α
-            self.Alpha = (conc * m).to(device=self.device, dtype=torch.float32)
-
-            # --- helper: KL avg ---
-            def _kl_avg():
-                PF = float(self.Estep_PF(self.Beta))
-                QF = float(self.Estep_QF(self.Beta))
-                return (QF - PF) / max(1, int(self.Nsample))
-
-            # auto target if requested
-            if isinstance(kl_target, str) and kl_target.lower() == "auto":
-                KL0 = _kl_avg()
-                if KL0 <= 0 or not np.isfinite(KL0):
-                    lo, hi = 0.1, 0.5
-                else:
-                    lo, hi = kl_scale[0] * KL0, kl_scale[1] * KL0
+        if Expected is not None:
+            if isinstance(Expected, dict):
+                Group = Expected.get('Group', torch.eye(Expected['Expectation'].shape[1], device=self.device))
+                Expected = Expected['Expectation']
             else:
-                lo, hi = kl_target
+                # if DataFrame, convert while keeping alignment
+                if isinstance(Expected, pd.DataFrame):
+                    Expected = Expected.to_numpy(dtype=float)
+                Group = torch.eye(Expected.shape[1], device=self.device)
 
-            # --- feedback loop ---
-            for _ in range(int(max_adjust_steps)):
-                kl = _kl_avg()
-                if kl > hi:
-                    conc *= 0.85    # weaken prior
-                elif kl < lo:
-                    conc *= 1.15    # strengthen prior
-                else:
-                    break
-                self.Alpha = (conc * m).to(device=self.device, dtype=torch.float32)
+            # sanity check: dimensions must match
+            if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
+                raise ValueError(
+                    f"Pre-determined fraction shape mismatch: "
+                    f"Expected {Expected.shape}, but Beta is {(self.Nsample, self.Ncell)}"
+                )
 
-        return self
+            # now safe to tensor-ize
+            Expected = torch.tensor(Expected, device=self.device, dtype=torch.float32)
+            Group = torch.tensor(Group, device=self.device, dtype=torch.float32)
 
+            for sample in range(self.Nsample):
+                Fraction = Fraction_Avg.clone()
 
-    def Update_Alpha_Group2(
-        self,
-        Expected=None,
-        mean_blend: float = 0.35,
-        base_conc: float | None = None,
-        floor_eps: float = 1e-3,
-        kl_target=(0.1, 0.5),
-        max_adjust_steps: int = 3,
-    ):
-        """
-        Dataset-agnostic α update:
-        - blended per-sample prior mean (per-sample seeds from current Beta)
-        - fixed concentration (row-sum) with a small floor
-        - light feedback to keep KL(q||p) in a sane band
-        This replaces the old Update_Alpha_Group behavior with a robust default.
-        """
+                # groups with non-NaN priors
+                IndG = torch.where(~torch.isnan(Expected[sample]))[0]
 
-        eps = 1e-12
-        C = int(self.Ncell)
-        conc = float(base_conc if base_conc is not None else C)
+                IndCells = []
+                for group in IndG:
+                    IndCell = torch.where(Group[group, :] == 1)[0]
 
-        with torch.no_grad():
-            # seeds = current per-sample means (row-normalized Beta)
-            F = self.Beta.clamp_min(1e-12)
-            F = F / F.sum(dim=1, keepdim=True)
+                    group_sum = torch.sum(Fraction[IndCell])
+                    Fraction[IndCell] /= group_sum if group_sum > 0 else 1.0
+                    Fraction[IndCell] *= Expected[sample, group]
 
-            # global mean
-            AvgBeta = self.Beta.mean(dim=0)
-            m_global = AvgBeta / AvgBeta.sum().clamp_min(eps)
+                    IndCells.extend(IndCell.tolist())
 
-            # blended per-sample mean + tiny floor
-            m = (1.0 - mean_blend) * m_global.unsqueeze(0).expand_as(F) + mean_blend * F
-            m = m + float(floor_eps)
-            m = m / m.sum(dim=1, keepdim=True).clamp_min(eps)
+                all_indices = torch.arange(Group.shape[1], device=self.device)
+                mask = torch.ones(Group.shape[1], dtype=torch.bool, device=self.device)
+                mask[IndCells] = False
+                IndNan = all_indices[mask]
 
-            # satisfy Expected (if provided) in a generic way
-            if Expected is not None:
-                if isinstance(Expected, dict):
-                    G = Expected.get("Group", torch.eye(Expected["Expectation"].shape[1], device=self.device))
-                    E = Expected["Expectation"]
-                else:
-                    G = torch.eye(Expected.shape[1], device=self.device)
-                    E = Expected
+                remaining_mass = 1.0 - torch.sum(Expected[sample, IndG])
 
-                G = torch.as_tensor(G, device=self.device, dtype=torch.float32)
-                E = torch.as_tensor(E, device=self.device, dtype=torch.float32)
+                Fraction[IndNan] /= torch.sum(Fraction[IndNan])
+                Fraction[IndNan] *= remaining_mass
 
-                all_idx = torch.arange(C, device=self.device)
-                for s in range(self.Nsample):
-                    frac = m[s].clone()
-                    IndG = torch.where(~torch.isnan(E[s]))[0]
-                    used = []
-                    for g in IndG:
-                        cells = torch.where(G[g] == 1)[0]
-                        denom = frac[cells].sum().clamp_min(eps)
-                        frac[cells] = frac[cells] / denom * E[s, g]
-                        used.extend(cells.tolist())
-                    mask = torch.ones(C, dtype=torch.bool, device=self.device)
-                    if used:
-                        mask[torch.tensor(used, device=self.device)] = False
-                    rest = all_idx[mask]
-                    remaining = 1.0 - (E[s, IndG].sum() if IndG.numel() else 0.0)
-                    remaining = remaining.clamp(0.0, 1.0)
-                    if rest.numel() > 0:
-                        denom_rest = frac[rest].sum().clamp_min(eps)
-                        frac[rest] = frac[rest] / denom_rest * remaining
-                    m[s] = frac / frac.sum().clamp_min(eps)
+                AlphaSum = torch.sum(AvgBeta[IndNan]) / torch.sum(Fraction[IndNan])
+                self.Alpha[sample] = Fraction * AlphaSum
 
-            # initial α
-            self.Alpha = (conc * m).to(device=self.device, dtype=torch.float32)
-
-            # --- light feedback: keep KL in a band ---
-            def _kl_avg():
-                PF = float(self.Estep_PF(self.Beta))
-                QF = float(self.Estep_QF(self.Beta))
-                return (QF - PF) / max(1, int(self.Nsample))  # average per-sample KL
-
-            lo, hi = kl_target
-            for _ in range(int(max_adjust_steps)):
-                kl = _kl_avg()
-                if kl > hi:
-                    conc *= 0.85
-                elif kl < lo:
-                    conc *= 1.15
-                else:
-                    break
-                self.Alpha = (conc * m).to(device=self.device, dtype=torch.float32)
-
-        return self 
-
+        else:
+            # no prior provided → use AvgBeta for all samples
+            self.Alpha = AvgBeta.repeat(self.Nsample, 1)
 
     def Update_SigmaY(self, SampleSpecific=False):
         Var = VarQ_C(self.Nu, self.Beta, self.Omega, self.Ngene, self.Ncell, self.Nsample)
@@ -1662,13 +1520,13 @@ def Iterative_Optimization(
     Init_Fraction,
     Init_Trust=10,
     Expected=None,
-    iter=100,
+    iter=1000,
     minDiff=1e-4,
     TempRange=None,
     Update_SigmaY=False,
     device=None,
     *,
-    warm_start: bool = True,
+    warm_start: bool = False,
     adam_params: dict = None,  # safe defaults handled below
     lbfgs_params: dict = None,
     runtime_threads: int | None = None,  # NEW: per-process CPU threads; GPU workers force 1
@@ -1706,11 +1564,9 @@ def Iterative_Optimization(
     with torch.no_grad():
         obj_func[0] = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
 
-    robust_alpha_iters = (range(1,iter))
+    
 
-    for i in range(1, iter):
-        did_opt = False
-
+    for i in range(1, iter):    
         if i == 1 and warm_start:
             obj.Optimize(
                 method="adam",
@@ -1722,7 +1578,6 @@ def Iterative_Optimization(
                 phase="adam",
                 outer_step=i,
             )
-            did_opt = True
         else:
             try:
                 obj.Optimize(
@@ -1737,33 +1592,13 @@ def Iterative_Optimization(
                     phase="lbfgs",
                     outer_step=i,
                 )
-                did_opt = True
+
+                obj.Update_Alpha_Group(Expected=Expected)
+                if Update_SigmaY:
+                    obj.Update_SigmaY()
             except Exception as e:
                 print(f"[WARN] optimisation failed at iter {i} rep {Rep} ({e})]")
 
-        # ---- EARLY-ONLY robust α update (uses current Beta as seeds) ----
-        if did_opt and i in robust_alpha_iters:
-            obj.Update_Alpha_Group(
-                Expected=Expected,          # or None
-                base_conc=obj.Ncell,        # Σα = C (stable prior strength)
-                mean_blend=0,            #knob for preserving per-sample heterogeneity 0 for pure global mean for every sample and 1 for pure per-sample mean
-                floor_eps=1e-3,             # avoid zero-mass collapse
-                kl_target="auto",       # light auto-tuning via KL
-            )
-            # (do not update Alpha after these early iterations)
-
-
-        # ---- DIAGNOSTIC LOGGING ----
-        # with torch.no_grad():
-        #     s_alpha = obj.Alpha.sum(1)
-        #     B0 = obj.Beta.sum(1)
-        #     PF, QF = float(obj.Estep_PF(obj.Beta)), float(obj.Estep_QF(obj.Beta))
-        #     KL = (QF - PF) / max(1, obj.Nsample)
-        #     ratio = (s_alpha / (B0 + 1e-9)).mean().item()
-        #     print(f"Σα~{s_alpha.mean().item():.2f}  α/B0~{ratio:.3f}  KL≈{KL:.3f}")
-
-        if Update_SigmaY:
-            obj.Update_SigmaY()
 
         with torch.no_grad():
             obj_val = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
@@ -1923,7 +1758,7 @@ def Framework_Iterative(
     Temperature=None,
     IterMax=100,
     *,
-    warm_start: bool = True,
+    warm_start: bool = False,
     collect_logs: bool = False,
     adam_params: dict = None,
     lbfgs_params: dict = None,
@@ -1933,7 +1768,7 @@ def Framework_Iterative(
     # --- defaults for optimizer kwargs ---
     adam_params = adam_params or {"lr": 0.001, "steps": 200, "betas": [0.9, 0.98], "grad_clip": 10000.0}
 
-    lbfgs_params = lbfgs_params or {"lr": 0.1, "steps": 12, "max_iter": 12, "history_size": 100, "line_search_fn": "strong_wolfe" }
+    lbfgs_params = lbfgs_params or {"lr": 0.1, "steps": 20, "max_iter": 30, "history_size": 100, "line_search_fn": "strong_wolfe"}
 
     args = locals()
 
@@ -1978,7 +1813,7 @@ def Framework_Iterative(
     print("Initialization with Support vector regression")
 
     # Use effective concurrency here too
-    Init_Fraction, Ind_use = SVR_Initialization(X_small, Y_small, Njob=(Njob_eff or 1), Nus=[0.25, 0.5, 0.75])
+    Init_Fraction, Ind_use = SVR_Initialization(X_small, Y_small, Njob=(10), Nus=[0.25, 0.5, 0.75])
 
     # ---------- worker wrapper (with OOM hint) ----------
     def _iter_one(rep):
@@ -2896,151 +2731,9 @@ class BLADE_numba:
             for sample in range(self.Nsample):
                 self.Alpha[sample, :] = Fraction[sample, :] * np.sum(self.Beta[sample, :])
 
-    def Update_Alpha_Blended(self, Expected=None, *, lam: float = 0.7, concentration: float = 5.0):
-        """
-        Build a Dirichlet prior α by blending the empirical average fraction with
-        an expectation-derived fraction (if provided).
-
-        α_row = concentration * ((1-lam)*Fraction_Avg + lam*Fraction_expected(sample))
-
-        Args:
-        Expected:
-            - None → α_row = concentration * Fraction_Avg   (for every sample)
-            - dict or tensor, same shapes as in your current code
-        lam:           blend weight for Expected (0..1). Higher = stronger enforcement.
-        concentration: total Dirichlet mass C; smaller = weaker prior (less shrinkage).
-        """
-        device = self.device
-        dtype  = torch.float32
-
-        # --- 1) Base empirical fraction (global over samples)
-        AvgBeta = torch.mean(self.Beta, dim=0)                  # (C,)
-        frac_avg = AvgBeta / torch.clamp(AvgBeta.sum(), min=1e-12)  # (C,)
-
-        # --- 2) If no Expected → same α row for all samples (weak & well-scaled)
-        if Expected is None:
-            alpha_row = (concentration * frac_avg).to(device=device, dtype=dtype)
-            self.Alpha = alpha_row.unsqueeze(0).repeat(self.Nsample, 1)
-            return
-
-        # --- 3) Prep Group / Expected (same semantics as your current implementation)
-        if isinstance(Expected, dict):
-            Group = Expected.get("Group", torch.eye(Expected["Expectation"].shape[1], device=device))
-            Expected = Expected["Expectation"]
-        else:
-            Group = torch.eye(Expected.shape[1], device=device)
-
-        Expected = torch.as_tensor(Expected, device=device, dtype=dtype)
-        Group    = torch.as_tensor(Group,    device=device, dtype=dtype)
-
-        if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
-            raise ValueError("Pre-determined fraction is in wrong shape (Nsample × Ncelltype)")
-
-        # --- 4) For each sample, build Expected-based fraction, then blend
-        C = self.Beta.shape[1]
-        alpha = torch.empty((self.Nsample, C), device=device, dtype=dtype)
-
-        all_idx = torch.arange(C, device=device)
-
-        for s in range(self.Nsample):
-            frac = frac_avg.clone()  # start from global average fraction
-
-            # indices of groups with specified mass
-            IndG = torch.where(~torch.isnan(Expected[s]))[0]
-            IndCells = []
-
-            # allocate group masses
-            for g in IndG:
-                cells = torch.where(Group[g] == 1)[0]
-                denom = torch.clamp(frac[cells].sum(), min=1e-12)
-                frac[cells] = frac[cells] / denom
-                frac[cells] = frac[cells] * Expected[s, g]
-                IndCells.extend(cells.tolist())
-
-            # remaining cells share the leftover mass
-            mask = torch.ones(C, dtype=torch.bool, device=device)
-            if IndCells:
-                mask[torch.tensor(IndCells, device=device)] = False
-            IndRest = all_idx[mask]
-
-            remaining = 1.0 - (Expected[s, IndG].sum() if IndG.numel() > 0 else 0.0)
-            denom_rest = torch.clamp(frac[IndRest].sum(), min=1e-12)
-            frac[IndRest] = frac[IndRest] / denom_rest
-            frac[IndRest] = frac[IndRest] * remaining
-
-            # --- 5) Blend with the empirical base, then make a Dirichlet row
-            frac_blend = (1.0 - lam) * frac_avg + lam * frac
-            frac_blend = frac_blend / torch.clamp(frac_blend.sum(), min=1e-12)  # safety
-            alpha[s] = concentration * frac_blend
-
-        self.Alpha = alpha
-
-
-    def Update_Alpha_Group(self, Expected=None, Temperature=None):
-        eps = 1e-12
-        AvgBeta = torch.mean(self.Beta, dim=0)                                  # [Ncell]
-        Fraction_Avg = AvgBeta / torch.clamp(torch.sum(AvgBeta), min=eps)
-
-        # Unconstrained: original behavior
-        if Expected is None:
-            self.Alpha[:] = AvgBeta
-            return
-
-        # Constrained: same as original + guards
-        if isinstance(Expected, dict):
-            Group = Expected.get('Group', torch.eye(Expected['Expectation'].shape[1], device=self.device))
-            Expected = Expected['Expectation']
-        else:
-            Group = torch.eye(Expected.shape[1], device=self.device)
-
-        Expected = torch.as_tensor(Expected, device=self.device, dtype=torch.float32)
-        Group    = torch.as_tensor(Group,    device=self.device, dtype=torch.float32)
-
-        if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
-            raise ValueError('Pre-determined fraction is in wrong shape (Nsample × Ncelltype)')
-
-        Ncell = Group.shape[1]
-        all_indices = torch.arange(Ncell, device=self.device)
-
-        for sample in range(self.Nsample):
-            Fraction = Fraction_Avg.clone()
-            IndG = torch.where(~torch.isnan(Expected[sample]))[0]
-
-            IndCells = []
-            for g in IndG:
-                IndCell = torch.where(Group[g, :] == 1)[0]
-                s = torch.sum(Fraction[IndCell])
-                if s > 0:
-                    Fraction[IndCell] = Fraction[IndCell] / s
-                Fraction[IndCell] = Fraction[IndCell] * Expected[sample, g]
-                IndCells.extend(IndCell.tolist())
-
-            mask = torch.ones(Ncell, dtype=torch.bool, device=self.device)
-            if IndCells:
-                mask[torch.tensor(IndCells, device=self.device)] = False
-            IndNan = all_indices[mask]
-
-            remaining_mass = 1.0 - torch.nansum(Expected[sample, IndG]) if IndG.numel() > 0 else torch.tensor(1.0, device=self.device)
-            remaining_mass = torch.clamp(remaining_mass, min=0.0, max=1.0)
-
-            if IndNan.numel() > 0:
-                denom = torch.sum(Fraction[IndNan])
-                if denom > 0:
-                    Fraction[IndNan] = Fraction[IndNan] / denom
-                Fraction[IndNan] = Fraction[IndNan] * remaining_mass
-
-                denom2 = torch.clamp(torch.sum(Fraction[IndNan]), min=eps)
-                AlphaSum = torch.sum(AvgBeta[IndNan]) / denom2
-            else:
-                AlphaSum = torch.tensor(1.0, device=self.device)  # guard
-
-            self.Alpha[sample] = Fraction * AlphaSum
-
-
-
-    def Update_Alpha_Group4(
-        self, Expected=None, Temperature=None
-    ):  # if Expected fraction is given, that part will be fixed
+    
+    
+    def Update_Alpha_Group(self, Expected=None, Temperature=None):# if Expected fraction is given, that part will be fixed
         # Updating Alpha
         AvgBeta = np.mean(self.Beta, 0)
         Fraction_Avg = AvgBeta / np.sum(AvgBeta)
@@ -3048,48 +2741,39 @@ class BLADE_numba:
         if Expected is not None:  # Reflect the expected values
             # expectaion can be a diction (with two keys; Group and Expectation) or just a matrix
             if type(Expected) is dict:
-                if (
-                    "Group" in Expected
-                ):  # Group (Ngroup by Nctype matrix) indicates a group of cell types with known collective fraction
-                    Group = Expected["Group"]
+                if "Group" in Expected:  # Group (Ngroup by Nctype matrix) indicates a group of cell types with known collective fraction
+                    Group = Expected['Group']
                 else:
-                    Group = np.identity(Expected["Expectation"].shape[1])
-                Expected = Expected["Expectation"]
+                    Group = np.identity(Expected['Expectation'].shape[1])
+                Expected = Expected['Expectation']
             else:
                 Group = np.identity(Expected.shape[1])
 
             if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
-                raise ValueError("Pre-determined fraction is in wrong shape (should be Nsample by Ncelltype)")
+                raise ValueError('Pre-determined fraction is in wrong shape (should be Nsample by Ncelltype)')
 
             # rescale the fraction to meet the expected fraction
             for sample in range(self.Nsample):
                 Fraction = np.copy(Fraction_Avg)
-                IndG = np.where(~np.isnan(Expected[sample, :]))[0]
+                IndG = np.where(~np.isnan(Expected[sample,:]))[0]
                 IndCells = []
-
+                
                 for group in IndG:
-                    IndCell = np.where(Group[group, :] == 1)[0]
-                    Fraction[IndCell] = Fraction[IndCell] / np.sum(
-                        Fraction[IndCell]
-                    )  # make fraction sum to one for the group
-                    Fraction[IndCell] = (
-                        Fraction[IndCell] * Expected[sample, group]
-                    )  # assign determined fraction for the group
+                    IndCell = np.where(Group[group,:] == 1)[0]
+                    Fraction[IndCell] = Fraction[IndCell] / np.sum(Fraction[IndCell])  # make fraction sum to one for the group
+                    Fraction[IndCell] = Fraction[IndCell] * Expected[sample, group]  # assign determined fraction for the group
                     IndCells = IndCells + list(IndCell)
-
+                    
                 IndNan = np.setdiff1d(np.array(range(Group.shape[1])), np.array(IndCells))
-                Fraction[IndNan] = Fraction[IndNan] / np.sum(
-                    Fraction[IndNan]
-                )  # normalize the rest of cell types (sum to one)
-                Fraction[IndNan] = Fraction[IndNan] * (
-                    1 - np.sum(Expected[sample, IndG])
-                )  # assign determined fraction for the rest of cell types
-
-                AlphaSum = np.sum(AvgBeta[IndNan]) / np.sum(Fraction[IndNan])
+                Fraction[IndNan] = Fraction[IndNan] / np.sum(Fraction[IndNan])  # normalize the rest of cell types (sum to one)
+                Fraction[IndNan] = Fraction[IndNan] * (1-np.sum(Expected[sample, IndG]))  # assign determined fraction for the rest of cell types
+            
+                AlphaSum = np.sum(AvgBeta[IndNan])/ np.sum(Fraction[IndNan])
                 self.Alpha[sample, :] = Fraction * AlphaSum
         else:
             for sample in range(self.Nsample):
-                self.Alpha[sample, :] = AvgBeta
+                self.Alpha[sample,:] = AvgBeta
+
 
     def Update_SigmaY(self, SampleSpecific=False):
         Var = VarQ_numba(self.Nu, self.Beta, self.Omega, self.Ngene, self.Ncell, self.Nsample)
