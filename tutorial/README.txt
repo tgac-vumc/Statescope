@@ -104,3 +104,4 @@ model.Deconvolution(adam_params=adam_params, lbfgs_params=lbfgs_params)
 used = torch.cuda.max_memory_allocated()/(1024**3)
 print(f"peak VRAM ≈ {used:.2f} GiB")
 ```
+
