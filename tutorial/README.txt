@@ -1,6 +1,3 @@
-Got it ✅ — the issue is likely because of mixing Markdown headers, text, and fenced code blocks.
-Here’s a **cleaned Markdown version** you can paste directly into a README.md (GitHub/Markdown renderer will format correctly with headers, code boxes, etc.):
-
 ````markdown
 # Statescope Deconvolution — Troubleshooting
 
