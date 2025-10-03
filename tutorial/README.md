@@ -14,7 +14,7 @@ Specify whether to save to CPU or GPU state.
 ```python
 model.save("/path/to/model.pkl", to_cpu=True)   # save with CPU tensors
 model.save("/path/to/model.pkl", to_cpu=False)  # save with GPU tensors
-```
+````
 
 ### Load
 
@@ -28,7 +28,6 @@ model = Statescope.load(
     blade_class=BLADE
 )
 ```
----
 
 ## Slow convergence
 
