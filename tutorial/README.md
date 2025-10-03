@@ -28,6 +28,7 @@ model = Statescope.load(
     blade_class=BLADE
 )
 ```
+---
 
 ## Slow convergence
 
