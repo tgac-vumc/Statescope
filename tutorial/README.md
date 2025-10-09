@@ -66,8 +66,7 @@ lbfgs_params = {
 ```
 
 * This value is compared to free GPU memory and jobs are capped so total use ≤ ~85%.
-* Use `1.25` for ~1000 samples × 1500 genes × 15 cell types.
-* Scale up for more genes/celltypes.
+
 
 Extra:
 
@@ -118,16 +117,4 @@ Pass them:
 ```python
 model.Deconvolution(adam_params=adam_params, lbfgs_params=lbfgs_params)
 ```
-
----
-
-## Check VRAM
-
-```python
-used = torch.cuda.max_memory_allocated()/(1024**3)
-print(f"peak VRAM ≈ {used:.2f} GiB")
-```
-
----
-
 
