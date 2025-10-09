@@ -46,7 +46,7 @@ Nrep=more                      # more restarts
 lbfgs_params["lr"] = lower
 adam_params["lr"] = lower
 adam_params["grad_clip"] = 10000.0  # clamp exploding grads
-Expectation[...] = NaN or (0,1)     # never exact 0 or 1
+Expectation[...] = NaN and never exact 0 or 1 (add some small pseudo value)
 ```
 
 ---
