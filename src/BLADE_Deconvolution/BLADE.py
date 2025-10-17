@@ -1632,19 +1632,19 @@ def Iterative_Optimization(
                 obj_func = obj_func[: i + 1]
                 break
 
-    # obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
-    # obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-    #              line_search_fn="strong_wolfe", logger=run_log, phase="polish:Nu", outer_step=iter)
+    obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
+    obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+                  line_search_fn="strong_wolfe", logger=run_log, phase="polish:Nu", outer_step=iter)
 
-    # obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
-    # obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-    #              line_search_fn="strong_wolfe", logger=run_log, phase="polish:Omega", outer_step=iter)
+    obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
+    obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+                  line_search_fn="strong_wolfe", logger=run_log, phase="polish:Omega", outer_step=iter)
 
-    # obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
-    # obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-    #              line_search_fn="strong_wolfe", logger=run_log, phase="polish:Beta", outer_step=iter)
+    obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
+    obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+                  line_search_fn="strong_wolfe", logger=run_log, phase="polish:Beta", outer_step=iter)
 
-    # obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
+    obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
 
     with torch.no_grad():
         obj_func.append(float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)))
