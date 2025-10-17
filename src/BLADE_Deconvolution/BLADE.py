@@ -44,11 +44,11 @@ from contextlib import contextmanager
 
 
 if torch.cuda.is_available():
-    torch.set_default_dtype(torch.float32)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_float32_matmul_precision("high")
+    torch.set_default_dtype(torch.float64)
+    # torch.backends.cuda.matmul.allow_tf32 = True
+    # torch.set_float32_matmul_precision("high")
 else:
-    torch.set_default_dtype(torch.float32)
+    torch.set_default_dtype(torch.float64)
 
 
 def _debug_precision_report(model, tag="[Precision]"):
@@ -314,74 +314,64 @@ def ExpQ_C(Nu, Beta, Omega):
     return out.T
 
 
-# @torch_prof
-def VarQ_C(Nu, Beta, Omega, Ngene, Ncell, Nsample):
-    # --- shape checks ---
+def VarQ_C(
+    Nu, Beta, Omega, Ngene, Ncell, Nsample,
+    *, chunk_G: int | None = None, cap_bytes: int = 64 * 1024 * 1024
+):
+    """
+    Chunked Torch version of original VarQ (matches legacy math).
+    Returns: (G, S)
+    """
+    eps = 1e-12
     S, G, C = Nu.shape
-    assert (S, G, C) == (Nsample, Ngene, Ncell), "Shape mismatch vs. Ngene/Ncell/Nsample"
+    assert (S, G, C) == (Nsample, Ngene, Ncell)
+    assert Beta.shape == (S, C) and Omega.shape == (G, C)
 
-    EPS = 1e-12
     device, dtype = Nu.device, Nu.dtype
 
-    # ---- Dirichlet bits (computed once) ----
-    B0 = Beta.sum(dim=1, keepdim=True).clamp_min(EPS)  # (S,1)
-    mu = ExpF_C(Beta)  # (S,C)
-    mu = mu / mu.sum(dim=1, keepdim=True).clamp_min(EPS)
-    mu2 = mu * mu  # (S,C)
-    VarB = mu * (1.0 - mu) / (B0 + 1.0)  # (S,C)
+    # --- Dirichlet moments (once) ---
+    B0     = Beta.sum(dim=1).clamp_min(eps)                          # (S,)
+    Btilda = Beta / B0.unsqueeze(1)                                   # (S,C)
+    VarB   = Btilda * (1.0 - Btilda) / (B0 + 1.0).unsqueeze(1)        # (S,C)
+    CovB   = -(Btilda.unsqueeze(2) * Btilda.unsqueeze(1)) / (1.0 + B0).unsqueeze(1).unsqueeze(2)  # (S,C,C)
 
-    # ---- helper: (S,C) x (S,g,C) -> (S,g) via bmm ----
-    def _bmm_sum_over_c(weights_sc, mat_sgc):
-        return torch.bmm(
-            weights_sc.unsqueeze(1),  # (S,1,C)
-            mat_sgc.transpose(1, 2).contiguous(),  # (S,C,g)
-        ).squeeze(1)  # (S,g)
-
-    # ---- output buffer ----
     out = torch.empty((G, S), dtype=dtype, device=device)
 
-    # ---- choose chunk size for genes to keep ~64 MB live working set ----
-    # live big tensors per chunk: v (S,g,C) and v2 (S,g,C) ⇒ about 2 * S*g*C * element_size bytes
-    elt = Nu.element_size()
-    cap_bytes = 64 * 1024 * 1024
-    denom = max(1, 3 * S * C * elt)  # use 3× for safety (accounts for small extras)
-    chunk_G = max(1, cap_bytes // denom)
+    # --- choose chunk size over genes ---
+    if chunk_G is None:
+        elt = Nu.element_size()
+        denom = max(1, 4 * S * C * elt)      # rough live bytes per gene in chunk
+        chunk_G = max(1, cap_bytes // denom)
 
-    one_over_1pB0 = 1.0 / (1.0 + B0)  # (S,1)
+    def _bmm_sc_sgc(weights_sc, mat_sgc):
+        # (S,C) · (S,g,C) -> (S,g)
+        return torch.bmm(weights_sc.unsqueeze(1), mat_sgc.transpose(1, 2).contiguous()).squeeze(1)
 
     for g0 in range(0, G, chunk_G):
         g1 = min(G, g0 + chunk_G)
-        Nu_s = Nu[:, g0:g1, :]  # (S,g,C)
-        Om_s = Omega[g0:g1, :]  # (g,C)
-        Om2 = Om_s.square()  # (g,C)
 
-        # v  = E[X]   = exp(Nu + 0.5*Omega^2)
-        # v2 = (E[X])^2 = exp(2*Nu + Omega^2)
-        v = torch.exp(Nu_s + 0.5 * Om2.unsqueeze(0))  # (S,g,C)
-        v2 = v.square()  # (S,g,C)
+        Nu_s = Nu[:, g0:g1, :]                    # (S, g, C)
+        Om2  = Omega[g0:g1, :].square()           # (g, C)
 
-        # E[X^2] = exp(2*Nu + 2*Omega^2) = v2 * exp(Omega^2)
-        expX2 = v2 * torch.exp(Om2).unsqueeze(0)  # (S,g,C)
+        # Lognormal moments
+        v     = torch.exp(Nu_s + 0.5 * Om2.unsqueeze(0))      # (S,g,C)   = E[X]
+        v2    = torch.exp(2.0 * Nu_s + Om2.unsqueeze(0))      # (S,g,C)   = (E[X])^2
+        expX2 = v2 * torch.exp(Om2).unsqueeze(0)              # (S,g,C)   = E[X^2]
 
-        # ---- VarTerm ----
-        # T1 = sum_c E[X^2] * (VarF + mu^2)
-        T1 = _bmm_sum_over_c(VarB + mu2, expX2)  # (S,g)
-        # T2 = sum_c (E[X])^2 * mu^2
-        T2 = _bmm_sum_over_c(mu2, v2)  # (S,g)
-        VarTerm_Sg = T1 - T2  # (S,g)
+        # VarTerm over c
+        W1 = VarB + Btilda.square()                            # (S,C)
+        W2 = Btilda.square()                                   # (S,C)
+        VarTerm_Sg = _bmm_sc_sgc(W1, expX2) - _bmm_sc_sgc(W2, v2)   # (S,g)
 
-        # ---- CovTerm (closed-form; no 4-D, no loops) ----
-        # sum_mu_v  = sum_c mu * E[X]
-        # sum_mu2v2 = sum_c mu^2 * (E[X])^2
-        sum_mu_v = _bmm_sum_over_c(mu, v)  # (S,g)
-        sum_mu2v2 = _bmm_sum_over_c(mu2, v2)  # (S,g)
-        Cov_Sg = -(sum_mu_v.square() - sum_mu2v2) * one_over_1pB0  # (S,g) / (1+B0)
+        # CovTerm = sum_{l!=k} v_l v_k * CovB_{l,k}
+        quad_all = torch.einsum('sgc,sck,sgk->sg', v, CovB, v)                  # (S,g)
+        diagB    = torch.diagonal(CovB, dim1=1, dim2=2)                         # (S,C)
+        diag_sub = torch.einsum('sgc,sc,sgc->sg', v, diagB, v)                  # (S,g)
+        CovTerm_Sg = quad_all - diag_sub                                        # (S,g)
 
-        # write chunk as (G_chunk, S)
-        out[g0:g1, :] = (VarTerm_Sg + Cov_Sg).T
+        out[g0:g1, :] = (VarTerm_Sg + CovTerm_Sg).transpose(0, 1)               # (g,S)
 
     return out  # (G,S)
-
 
 # @torch_prof
 def Estep_PY_C(Y, SigmaY, Nu, Omega, Beta, Ngene, Ncell, Nsample):
@@ -686,54 +676,62 @@ def g_Var_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample):
     return g_Var
 
 
-
-
-# @torch_prof
 def g_PY_Beta_C(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
-    EPS = 1e-12  
+    eps = 1e-12
+    device = Beta.device
+    dtype  = Beta.dtype
 
-    Exp = ExpQ_C(Nu, Beta, Omega)              # (G,S)
-    Var = VarQ_C(Nu, Beta, Omega, Ngene, Ncell, Nsample)  # (G,S)
+    # Ensure tensors on the same device/dtype
+    Y       = Y.to(dtype=dtype, device=device)
+    SigmaY  = SigmaY.to(dtype=dtype, device=device)
 
-    # 2) grads
-    g_Exp = g_Exp_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)  # (S,C,G)
-    g_Var = g_Var_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)  # (S,C,G)
+    # Expectations & their gradients (must be your existing Torch fns)
+    Exp = ExpQ_C(Nu, Beta, Omega).to(dtype=dtype, device=device)  # (G, S)
+    Var = VarQ_C(Nu, Beta, Omega, Ngene, Ncell, Nsample).to(dtype=dtype, device=device)  # (G, S)
 
-    # --- clamp denominators to avoid huge broadcasts into irrelevant CTs ---
-    Exp_safe = Exp.clamp_min(EPS)              # (G,S)
-    Var_safe = Var                              # (G,S)  (usually okay)
-    SigmaY_safe = SigmaY.clamp_min(EPS)        # (G,S)
+    Exp = torch.clamp(Exp, min=eps)  # avoid log(0)
+    Var = torch.clamp(Var, min=eps)
 
-    # 3) a-term
-    Exp_t = Exp_safe.permute(1, 0)             # (S,G)
-    Var_t = Var_safe.permute(1, 0)             # (S,G)
+    g_Exp = g_Exp_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample).to(dtype=dtype, device=device)  # (S, C, G)
+    g_Var = g_Var_Beta_C(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample).to(dtype=dtype, device=device)  # (S, C, G)
 
-    numerator = g_Var * Exp_t.unsqueeze(1) - 2.0 * g_Exp * Var_t.unsqueeze(1)
-    denom = Exp_t.unsqueeze(1).clamp_min(EPS).pow(3)  # (S,1,G)
-    a = numerator / denom                         # (S,C,G)
+    # Transpose Exp/Var to (S, G) to align with g_* which are (S, C, G)
+    Exp_SG = Exp.transpose(0, 1)  # (S, G)
+    Var_SG = Var.transpose(0, 1)  # (S, G)
 
-    # 4) b-term
-    varExp2 = Var_safe / (2.0 * Exp_safe.square())  # (G,S)
-    varExp2_t = varExp2.permute(1, 0)               # (S,G)
+    # a = (dVar * Exp - 2 * dExp * Var) / Exp^3, broadcast over C
+    # shapes: g_Var (S,C,G), g_Exp (S,C,G), Exp_SG (S,G), Var_SG (S,G)
+    a = (g_Var * Exp_SG.unsqueeze(1) - 2.0 * g_Exp * Var_SG.unsqueeze(1)) / (Exp_SG.unsqueeze(1) ** 3)  # (S,C,G)
 
-    Y_t = Y.permute(1, 0)                           # (S,G)
-    logExp_t = torch.log(Exp_safe).permute(1, 0)    # (S,G)  <- log on clamped Exp
+    # Var/(2*Exp^2) term, shape (S,G)
+    Var_over_2Exp2 = Var_SG / (2.0 * (Exp_SG ** 2) + eps)  # (S, G)
 
-    two_gExp_over_Exp = 2.0 * g_Exp / Exp_t.unsqueeze(1).clamp_min(EPS)
-    inside = two_gExp_over_Exp + a
+    # Handle SigmaY: (G,) or (G,S)
+    if SigmaY.ndim == 1:
+        # Same per-gene sigma across samples
+        sigma2_SG = (SigmaY ** 2).unsqueeze(0).expand(Nsample, Ngene)  # (S, G)
+    else:
+        # Per-gene, per-sample sigma
+        assert SigmaY.shape == (Ngene, Nsample), "SigmaY must be (G,) or (G,S)."
+        sigma2_SG = (SigmaY ** 2).transpose(0, 1).contiguous()         # (S, G)
 
-    diff = Y_t.unsqueeze(1) - logExp_t.unsqueeze(1) - varExp2_t.unsqueeze(1)
-    b = -diff * inside                              # (S,C,G)
+    # term = (Y_{g,s} - log Exp_{g,s} - Var/(2*Exp^2))  -> (S,G)
+    term_SG = (Y.transpose(0, 1) - torch.log(Exp_SG) - Var_over_2Exp2)  # (S, G)
 
-    # 5) sum over genes with safe SigmaY
-    sum_ab = a + b
-    SigmaY_sq_t = SigmaY_safe.square().permute(1, 0).unsqueeze(1)  # (S,1,G)
+    # b = -term * ( 2 * dExp/Exp + a )
+    # Need to align dims: term_SG (S,G) -> (S,1,G)
+    two_dExp_over_Exp = 2.0 * (g_Exp / (Exp_SG.unsqueeze(1) + eps))      # (S,C,G)
+    b = -term_SG.unsqueeze(1) * (two_dExp_over_Exp + a)                  # (S,C,G)
 
-    factor = 0.5 / SigmaY_sq_t.clamp_min(EPS)
-    weighted_sum_ab = factor * sum_ab
-    grad_PY = -torch.sum(weighted_sum_ab, dim=2)     # (S,C)
+    # Combine a + b, weight by 1/(2*sigma^2), and sum over genes
+    # grad_PY[s, c] = -0.5 * sum_g ( (a+b)[s,c,g] / sigma2[s,g] )
+    numer = (a + b)                                                      # (S,C,G)
+    denom = sigma2_SG.unsqueeze(1)                                       # (S,1,G)
+    grad_PY = -0.5 * (numer / (denom + eps)).sum(dim=2)                  # (S, C)
 
     return grad_PY
+
+
 
 
 
@@ -1059,46 +1057,48 @@ class BLADE:
 
     # @torch_prof
     def grad_Beta(self, Nu, Omega, Beta):
-        # 1) Row sums
-        B0 = torch.sum(self.Beta, dim=1)  # (Nsample,)
+        # 1. B0 is sum of Beta along cells
+        B0 = torch.sum(self.Beta, dim=1)  # shape: (Nsample,)
 
-        # 2) Likelihood piece d/dBeta E[log P(Y|X,F)]
-        grad_PY = g_PY_Beta_C(
-            Nu, Beta, Omega, self.Y, self.SigmaY, B0,
-            self.Ngene, self.Ncell, self.Nsample
-        )  # (Nsample, Ncell)
+        # 2. Compute grad_PY
+        grad_PY = g_PY_Beta_C(Nu, Beta, Omega, self.Y, self.SigmaY,
+                            B0, self.Ngene, self.Ncell, self.Nsample)
+       #print(grad_PY, "grad_PY")
+        # 3. Compute grad_PF
+        polygamma_Beta = torch.special.polygamma(1, Beta)         # (Nsample, Ncell)
+        polygamma_B0    = torch.special.polygamma(1, B0).unsqueeze(1)  # (Nsample, 1)
 
-        # 3) Prior piece d/dBeta E[log P(F)]
-        polygamma_Beta = torch.special.polygamma(1, Beta)          # (S,C)
-        polygamma_B0   = torch.special.polygamma(1, B0).unsqueeze(1)  # (S,1)
-        
         grad_PF = (self.Alpha - 1) * polygamma_Beta \
                 - torch.sum((self.Alpha - 1) * polygamma_B0, dim=1, keepdim=True)
+                
+        # print(grad_PF, "grad_PF")
 
-        psi_Beta = torch.special.digamma(Beta)          # (S,C)
-        psi_B0   = torch.special.digamma(B0).unsqueeze(1)  # (S,1)
-
+        # 4. Compute grad_QF
         grad_QF = (Beta - 1) * polygamma_Beta \
-        - torch.sum((Beta - 1), dim=1, keepdim=True) * polygamma_B0 
-        # - (psi_Beta - psi_B0)   # <-- extra term
+                - torch.sum((Beta - 1) * polygamma_B0, dim=1, keepdim=True)
+        
+        # print(grad_QF, "grad_QF")
 
-        # 5) Match E_step weighting: PF and QF are scaled by sqrt(Ngene/Ncell)
-        scale = torch.sqrt(torch.tensor(self.Ngene / self.Ncell, dtype=Beta.dtype, device=Beta.device))
+        # 5. Combine everything (same final scaling as in NumPy code)
+        scaling_factor = torch.sqrt(torch.tensor(self.Ngene / self.Ncell,
+                                                dtype=Beta.dtype, device=Beta.device))
+        
+        # print(grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor, "grad_Beta")
 
-        # Optional safety if Beta can get tiny: (you already clamp in _finite_clamp_)
-        # Beta_clamped = Beta.clamp_min(1e-7)
+        # scaling_factor =1
 
-        return grad_PY + grad_PF - grad_QF 
+        return grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor
+              # (S, C)
 
-    # @torch_prof
     # E step
     def E_step(self, Nu, Beta, Omega):
-        PX = self.Estep_PX(Nu, Omega) * (1 / self.weight)
+        PX = self.Estep_PX(Nu, Omega) * (1/self.weight)
         PY = self.Estep_PY(Nu, Omega, Beta)
-        PF = self.Estep_PF(Beta) 
-        QX = self.Estep_QX(Omega) * (1 / self.weight)
-        QF = self.Estep_QF(Beta) 
-        return PX + PY + PF - QX - QF
+        PF = self.Estep_PF(Beta) * (self.Ngene / self.Ncell)**0.5
+        QX = self.Estep_QX(Omega) * (1/self.weight)
+        QF = self.Estep_QF(Beta) *(self.Ngene / self.Ncell)**0.5
+
+        return PX+PY+PF-QX-QF
 
     def _finite_clamp_(self):
         with torch.no_grad():
@@ -1365,6 +1365,7 @@ class BLADE:
         # Average concentration over all samples
         AvgBeta = torch.mean(self.Beta, dim=0)
         Fraction_Avg = AvgBeta / torch.sum(AvgBeta)
+        # print(f"[DEBUG] Fraction_Avg (mean baseline): {Fraction_Avg.detach().cpu().numpy()}")
 
         if Expected is not None:
             if isinstance(Expected, dict):
@@ -1384,8 +1385,12 @@ class BLADE:
                 )
 
             # now safe to tensor-ize
-            Expected = torch.tensor(Expected, device=self.device, dtype=torch.float32)
-            Group = torch.tensor(Group, device=self.device, dtype=torch.float32)
+            Expected = torch.tensor(Expected, device=self.device)
+            Group = torch.tensor(Group, device=self.device)
+
+            # print(f"[DEBUG] Expected tensor shape: {Expected.shape}")
+            # print(f"[DEBUG] Non-NaN priors per sample: {torch.sum(~torch.isnan(Expected), dim=1)}")
+            # print(f"[DEBUG] Sample 0 priors: {Expected[0].detach().cpu().numpy()}")
 
             for sample in range(self.Nsample):
                 Fraction = Fraction_Avg.clone()
@@ -1416,9 +1421,25 @@ class BLADE:
                 AlphaSum = torch.sum(AvgBeta[IndNan]) / torch.sum(Fraction[IndNan])
                 self.Alpha[sample] = Fraction * AlphaSum
 
+                # # --- DEBUG: per-sample output ---
+                # print(f"[DEBUG] Sample {sample}: used {len(IndG)} priors, remaining_mass={remaining_mass.item():.3f}")
+                # print(f"[DEBUG] Alpha[{sample}] sum={self.Alpha[sample].detach().sum().item():.4f}")
+
+            # --- DEBUG: summary after all samples ---
+            # print(f"[DEBUG] Alpha[0] after update: {self.Alpha[0].detach().cpu().numpy()}")
+            # diff = torch.sum(torch.abs(self.Alpha[0] - Fraction_Avg))
+            # print(f"[DEBUG] |Alpha[0] – Fraction_Avg| L1 difference: {diff.item():.6f}")
+
+            # optional flag for later checks
+            self.used_expectation = True
+
         else:
             # no prior provided → use AvgBeta for all samples
             self.Alpha = AvgBeta.repeat(self.Nsample, 1)
+            # print("[DEBUG] No Expected provided; Alpha copied from AvgBeta")
+            self.used_expectation = False
+
+
 
     def Update_SigmaY(self, SampleSpecific=False):
         Var = VarQ_C(self.Nu, self.Beta, self.Omega, self.Ngene, self.Ncell, self.Nsample)
@@ -1585,15 +1606,15 @@ def Iterative_Optimization(
                     steps=lbfgs_params.get("steps"),
                     lr=lbfgs_params.get("lr"),
                     max_iter=lbfgs_params.get("max_iter"),
-                    history_size=lbfgs_params.get("history_size"),
-                    line_search_fn=lbfgs_params.get("line_search_fn"),
+                    history_size=100,
+                    line_search_fn="strong_wolfe",
                     grad_clip=lbfgs_params.get("grad_clip"),
                     logger=run_log,
                     phase="lbfgs",
                     outer_step=i,
                 )
-
                 obj.Update_Alpha_Group(Expected=Expected)
+
                 if Update_SigmaY:
                     obj.Update_SigmaY()
             except Exception as e:
@@ -1611,26 +1632,25 @@ def Iterative_Optimization(
                 obj_func = obj_func[: i + 1]
                 break
 
-    obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
-    obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                 line_search_fn="strong_wolfe", logger=run_log, phase="polish:Nu", outer_step=iter)
+    # obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
+    # obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+    #              line_search_fn="strong_wolfe", logger=run_log, phase="polish:Nu", outer_step=iter)
 
-    obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
-    obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                 line_search_fn="strong_wolfe", logger=run_log, phase="polish:Omega", outer_step=iter)
+    # obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
+    # obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+    #              line_search_fn="strong_wolfe", logger=run_log, phase="polish:Omega", outer_step=iter)
 
-    obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
-    obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                 line_search_fn="strong_wolfe", logger=run_log, phase="polish:Beta", outer_step=iter)
+    # obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
+    # obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+    #              line_search_fn="strong_wolfe", logger=run_log, phase="polish:Beta", outer_step=iter)
 
-    obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
+    # obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
 
-
-    
     with torch.no_grad():
         obj_func.append(float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)))
 
     obj.train_log = getattr(obj, "train_log", []) + run_log.records
+    print(Rep, ": Optimization finished after", len(obj_func), "iterations.")
     return obj, obj_func, Rep
 
 
