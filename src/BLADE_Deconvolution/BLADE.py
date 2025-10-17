@@ -43,12 +43,31 @@ import importlib
 from contextlib import contextmanager
 
 
+import os, torch
+from contextlib import nullcontext
+
+# --- One-button full-precision mode ---
+torch.set_default_dtype(torch.float64)
+
+# Disable any lower-precision GPU math
 if torch.cuda.is_available():
-    torch.set_default_dtype(torch.float64)
-    # torch.backends.cuda.matmul.allow_tf32 = True
-    # torch.set_float32_matmul_precision("high")
-else:
-    torch.set_default_dtype(torch.float64)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+
+# Disable autocast safely (old & new PyTorch versions)
+try:
+    torch.set_autocast_enabled(False)
+except Exception:
+    pass
+autocast_disabled = nullcontext()
+
+# # Optional debug print
+# print(f"[Torch FP mode] default dtype: {torch.get_default_dtype()}")
+# if torch.cuda.is_available():
+#     print(f"[Torch FP mode] TF32 allowed: {torch.backends.cuda.matmul.allow_tf32}")
+
+
 
 
 def _debug_precision_report(model, tag="[Precision]"):
@@ -1090,6 +1109,7 @@ class BLADE:
         return grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor
               # (S, C)
 
+
     # E step
     def E_step(self, Nu, Beta, Omega):
         PX = self.Estep_PX(Nu, Omega) * (1/self.weight)
@@ -1634,15 +1654,15 @@ def Iterative_Optimization(
 
     obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
     obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                  line_search_fn="strong_wolfe", logger=run_log, phase="polish:Nu", outer_step=iter)
+                 line_search_fn="strong_wolfe", logger=run_log, phase="polish:Nu", outer_step=iter)
 
     obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
     obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                  line_search_fn="strong_wolfe", logger=run_log, phase="polish:Omega", outer_step=iter)
+                 line_search_fn="strong_wolfe", logger=run_log, phase="polish:Omega", outer_step=iter)
 
     obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
     obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                  line_search_fn="strong_wolfe", logger=run_log, phase="polish:Beta", outer_step=iter)
+                 line_search_fn="strong_wolfe", logger=run_log, phase="polish:Beta", outer_step=iter)
 
     obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
 
