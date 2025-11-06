@@ -47,6 +47,20 @@ import requests
 from io import StringIO
 import os
 import warnings
+import pickle
+import torch
+import io
+
+
+def _count_tensors(obj):
+        """Recursively count torch tensors in a nested structure."""
+        if torch.is_tensor(obj):
+            return 1
+        if isinstance(obj, dict):
+            return sum(_count_tensors(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return sum(_count_tensors(v) for v in obj)
+        return 0
 
 #-------------------------------------------------------------------------------
 # 1.1  Define Statescope Object
@@ -64,8 +78,247 @@ class Statescope:
 
         self.isDeconvolutionDone = False
         self.isRefinementDone = False
+<<<<<<< HEAD
         self.isStateDiscoveryDone = False
         self.isEcoTypeDiscoveryDone = False
+=======
+        self.isStateDiscoveryDone = False        
+        self.isEcoTypeDiscoveryDone = False
+        
+    @staticmethod
+    def _detect_devices_from_obj(obj):
+        """Return {'cpu','cuda'} (or subset) based on tensors/nn.Modules inside obj."""
+        devices = set()
+
+        def walk(x):
+            if torch.is_tensor(x):
+                devices.add('cuda' if x.is_cuda else 'cpu')
+                return
+            if hasattr(x, "parameters") and callable(getattr(x, "parameters", None)):
+                try:
+                    for p in x.parameters():
+                        if torch.is_tensor(p):
+                            devices.add('cuda' if p.is_cuda else 'cpu')
+                except Exception:
+                    pass
+            if isinstance(x, dict):
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, (list, tuple)):
+                for v in x:
+                    walk(v)
+
+        walk(obj)
+        if not devices:
+            devices.add('cpu')
+        return devices
+
+    @staticmethod
+    def _format_device_set(devs: set[str]) -> str:
+        if devs == {'cpu'}: return 'cpu'
+        if devs == {'cuda'}: return 'cuda'
+        return 'mixed'
+
+    def save(self, filepath, to_cpu=True):
+        """
+        Save a Statescope object to disk with optional CPU conversion.
+
+        Parameters
+        ----------
+        filepath : str
+            Destination path for the saved file (should end with `.pickle`).
+        to_cpu : bool, default=True
+            If True, all tensors are moved to CPU before saving (CPU-portable mode).
+            If False, tensors remain on their current device (device-preserving mode).
+
+        Notes
+        -----
+        * Use `to_cpu=True` if the file will be loaded on systems without GPU.
+        * Use `to_cpu=False` if you want to keep tensors on GPU for reloading on
+        the same GPU environment.
+
+        Examples
+        --------
+        >>> # Save a CPU-portable version (recommended for sharing)
+        >>> model.save("model_cpu.pickle", to_cpu=True)
+
+        >>> # Save a GPU-preserving version (reloads faster on the same GPU)
+        >>> model.save("model_gpu.pickle", to_cpu=False)
+        """
+        saved_format = "CPU-portable" if to_cpu else "device-preserving"
+        state = self.__dict__.copy()
+        has_blade_sd = False
+        has_refine_sd = False
+
+        # Extract & (optionally) CPU-ify state_dicts from torch modules
+        for attr in ['BLADE', 'BLADE_final']:
+            mod = state.get(attr, None)
+            if getattr(mod, 'state_dict', None):
+                sd = mod.state_dict()
+                if to_cpu:
+                    for k, v in sd.items():
+                        if torch.is_tensor(v):
+                            sd[k] = v.detach().cpu()
+                state[attr + '_state_dict'] = sd
+                state[attr] = None
+                if attr == 'BLADE':        has_blade_sd = True
+                if attr == 'BLADE_final':  has_refine_sd = True
+
+        # (Optionally) CPU-ify other tensors
+        if to_cpu:
+            def _to_cpu(obj):
+                if torch.is_tensor(obj):
+                    return obj.detach().cpu()
+                if isinstance(obj, dict):
+                    return {k: _to_cpu(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_to_cpu(v) for v in obj]
+                if isinstance(obj, tuple):
+                    return tuple(_to_cpu(v) for v in obj)
+                return obj
+            state = _to_cpu(state)
+
+        state["__statescope_meta"] = {
+            "saved_format": saved_format,
+            "torch_version": torch.__version__,
+            "has_blade_state": has_blade_sd,
+            "has_refine_state": has_refine_sd,
+        }
+
+        with open(filepath, "wb") as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        print(f"Saved Statescope → {filepath} (format: {saved_format})")
+
+
+    @classmethod
+    def load(cls, filepath, device='cpu', blade_class=None, *init_args, **init_kwargs):
+        """
+        Load a Statescope object from disk onto the desired device.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the saved Statescope file.
+        device : str, default='cpu'
+            Target device to move all tensors and modules to.
+            Use 'cuda' or 'cuda:N' for GPU, falls back to CPU if unavailable.
+        blade_class : type, optional
+            Class used to rebuild BLADE/BLADE_final from state_dict when the file
+            does not contain full module instances (weights-only save).
+            If None and modules were saved in full (default in new saves), they are
+            restored directly without needing `blade_class`.
+
+            Notes on `blade_class`:
+            - **Not needed** for files saved with the new "always save modules" mode
+            (these embed full BLADE instances and work without specifying it).
+            - **Required** for:
+                * Legacy CPU-portable/state_dict-only files.
+                * Cross-environment migration where only weights are saved.
+                * Environments or policies that forbid pickled class instances.
+            - Leaving this parameter ensures backwards compatibility and allows
+            switching to lighter, portable saves in the future.
+
+        *init_args, **init_kwargs :
+            Arguments passed to `blade_class` if re-building modules from state_dict.
+
+        Returns
+        -------
+        Statescope
+            The loaded Statescope object with tensors moved to the requested device.
+        """
+        def _move_any_tensors(obj, target):
+            if torch.is_tensor(obj):
+                return obj.to(target)
+            if hasattr(obj, "to") and callable(getattr(obj, "to")):
+                try:
+                    obj.to(target)
+                    return obj
+                except Exception:
+                    pass
+            if isinstance(obj, dict):
+                return {k: _move_any_tensors(v, target) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                seq = [_move_any_tensors(v, target) for v in obj]
+                return type(obj)(seq)
+            return obj
+
+        if isinstance(device, str) and device.startswith("cuda") and not torch.cuda.is_available():
+            print("CUDA requested but not available → loading on CPU instead.")
+            device = 'cpu'
+
+        with open(filepath, "rb") as f:
+            raw = f.read()
+
+        state = None
+        try:
+            state = torch.load(io.BytesIO(raw), map_location='cpu', weights_only=False)
+        except Exception:
+            pass
+
+        if state is None:
+            orig_torch_load = torch.load
+            def _torch_load_cpu(file_like, *args, **kwargs):
+                kwargs['map_location'] = 'cpu'
+                return orig_torch_load(file_like, **kwargs)
+            torch.load = _torch_load_cpu
+            try:
+                state = pickle.loads(raw)
+            except Exception:
+                pass
+            finally:
+                torch.load = orig_torch_load
+
+        if state is None:
+            state = pickle.loads(raw)
+
+        meta = {}
+        if isinstance(state, dict):
+            meta = state.get("__statescope_meta", {}) or {}
+
+        saved_format = meta.get("saved_format", "unknown")
+        had_blade_sd = bool(meta.get("has_blade_state", False))
+        had_ref_sd   = bool(meta.get("has_refine_state", False))
+
+        if isinstance(state, cls):
+            obj = state
+            obj.__dict__ = _move_any_tensors(obj.__dict__, device)
+            print(f"Loaded Statescope [file:legacy] on {device}")
+            return obj
+
+        if isinstance(state, dict):
+            obj = cls.__new__(cls)
+            obj.__dict__.update(state)
+
+            rebuilt_blade = False
+            rebuilt_ref   = False
+            if blade_class is None and (had_blade_sd or had_ref_sd or
+                                        "BLADE_state_dict" in state or
+                                        "BLADE_final_state_dict" in state):
+                print("BLADE weights present but 'blade_class' not provided → modules not restored.")
+
+            for attr in ['BLADE', 'BLADE_final']:
+                key = f"{attr}_state_dict"
+                if key in state and state[key] is not None and blade_class is not None:
+                    model = blade_class(*init_args, **init_kwargs)
+                    model.load_state_dict(state[key], strict=False)
+                    model.to(device)
+                    setattr(obj, attr, model)
+                    if attr == 'BLADE':        rebuilt_blade = True
+                    if attr == 'BLADE_final':  rebuilt_ref   = True
+
+            obj.__dict__ = _move_any_tensors(obj.__dict__, device)
+
+            blade_tag = ("restored" if rebuilt_blade or rebuilt_ref else
+                        "skipped"  if (had_blade_sd or had_ref_sd) else
+                        "none")
+            print(f"Loaded Statescope [file:{saved_format}] on {device}")
+            return obj
+
+        raise TypeError(
+            f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}"
+        )
+>>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
 
 
     def Deconvolution(self, Ind_Marker=None,
@@ -345,7 +598,11 @@ class Statescope:
         # 1) run cNMF / EcoTypeDiscovery               
         print('Performing cNMF EcoType Discovery')
         model, coph = EcoTypeDiscovery_FrameWork(
+<<<<<<< HEAD
                 Extract_StateScores(self),
+=======
+                self.StateScores,
+>>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
                 K,                 # may be None → auto
                 n_iter,
                 n_final_iter,
@@ -353,22 +610,36 @@ class Statescope:
                 max_clusters,
                 self.Ncores)
         
+<<<<<<< HEAD
         EcoType_cNMF = model
+=======
+        EcoType_dict = model
+>>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
         EcoType_CopheneticCoefficients = coph
         EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
         EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
              
         # 2) stash results in the object                               
         if not hasattr(self, 'EcoType_cNMF'):
+<<<<<<< HEAD
             self.EcoType_cNMF                   = EcoType_cNMF
+=======
+            self.EcoType_cNMF                   = EcoType_dict
+>>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
             self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
             self.EcoTypeScores            = EcoTypeScores
             self.EcoTypeLoadings          = EcoTypeLoadings
             self.isEcoTypeDiscoveryDone   = True
         else:
+<<<<<<< HEAD
             self.EcoType_cNMF = EcoType_cNMF
             self.EcoTypeScores = EcoTypeScores
             self.EcoTypeLoadings = EcoTypeLoadings
+=======
+            self.EcoType_cNMF.update(EcoType_dict)
+            self.EcoTypeScores.update(EcoTypeScores)
+            self.EcoTypeLoadings.update(EcoTypeLoadings)
+>>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
             
         print("EcoTypeDiscovery completed successfully.")
 
@@ -396,7 +667,7 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
   #subset Markers if supplied before creating signature 
     if Signature is not None:
         if isinstance(Signature, pd.DataFrame):
-            Check_Signature_validity(Signature)
+            Signature = Check_Signature_validity(Signature)
         elif isinstance(Signature, ad.AnnData):
              Signature = CreateSignature(
                 Signature,
@@ -424,7 +695,7 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
             error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
             error_msg += ', '.join(available_signatures[TumorType])
             raise ValueError(error_msg)
-    
+        Signature = Check_Signature_validity(Signature)
     if MarkerList:
         Signature['IsMarker'] = Signature.index.isin(MarkerList)
 
@@ -588,8 +859,13 @@ def Check_Bulk_Format(Bulk):
 # Function to check if custom Signature is valid
 def Check_Signature_validity(Signature):
     if isinstance(Signature, pd.DataFrame):
-        if not 'IsMarker' in Signature.columns:
+        if 'IsMarker' not in Signature.columns:
             raise AssertionError('IsMarker column is missing in Signature')
+
+        scVar_columns = [col for col in Signature.columns if 'scVar' in col]
+        if (Signature[scVar_columns] == 0).any().any():
+            Signature[scVar_columns] = Signature[scVar_columns] + 0.01
+    return Signature
 
 
 
@@ -770,6 +1046,111 @@ def Heatmap_Fractions(Statescope_model):
 
     # Show the plot
     plt.show()
+
+def Boxplot_CelltypeAbundance(
+        Statescope_model,
+        *,
+        order_by: str = "median",
+        figsize: tuple = (10, 6),
+        show_points: bool = True,
+        point_size: int = 40,
+        palette: str | list | dict = "husl",
+        mean_fs: int = 8):
+    """
+    Box‑plot of cell‑type fractions across samples.
+
+    • Boxes coloured by cell type.
+    • Mean shown as a small grey bar + red numeric label.
+    """
+    # 0) checks -----------------------------------------------------
+    if not hasattr(Statescope_model, "Fractions") or Statescope_model.Fractions is None:
+        raise ValueError("No Fractions found – run Deconvolution first.")
+    if Statescope_model.Fractions.empty:
+        raise ValueError("Fractions DataFrame is empty.")
+
+    frac = Statescope_model.Fractions.copy()
+
+    # 1) column order ---------------------------------------------
+    if order_by == "median":
+        order = frac.median().sort_values(ascending=False).index
+    elif order_by == "mean":
+        order = frac.mean().sort_values(ascending=False).index
+    else:
+        order = frac.columns
+
+    # 2) long‑form DF ---------------------------------------------
+    long_df = (frac[order]
+               .reset_index(names="Sample")
+               .melt(id_vars="Sample",
+                     var_name="Cell Type",
+                     value_name="Fraction"))
+
+    # 3) palette dict ---------------------------------------------
+    if isinstance(palette, str):
+        colours = sns.color_palette(palette, len(order))
+        palette_dict = dict(zip(order, colours))
+    elif isinstance(palette, list):
+        if len(palette) < len(order):
+            raise ValueError("Palette list shorter than number of cell types.")
+        palette_dict = dict(zip(order, palette))
+    elif isinstance(palette, dict):
+        missing = [ct for ct in order if ct not in palette]
+        if missing:
+            extra = sns.color_palette("husl", len(missing))
+            palette_dict = palette | dict(zip(missing, extra))
+        else:
+            palette_dict = palette
+    else:
+        raise TypeError("`palette` must be str, list or dict.")
+
+    # 4) plot ------------------------------------------------------
+    plt.figure(figsize=figsize)
+
+    sns.boxplot(
+        data=long_df,
+        x="Cell Type",
+        y="Fraction",
+        order=order,
+        palette=palette_dict,            # ← coloured fill
+        showcaps=True,
+        boxprops={"edgecolor": "black", "linewidth": 1},
+        medianprops={"color": "black"},
+        whiskerprops={"color": "black"},
+        flierprops={"marker": "o", "markersize": 3,
+                    "markerfacecolor": "grey", "markeredgecolor": "grey"}
+    )
+
+    if show_points:
+        sns.stripplot(
+            data=long_df,
+            x="Cell Type",
+            y="Fraction",
+            order=order,
+            color="black",               # ← black fill
+            edgecolor="darkgrey",        # subtle border
+            linewidth=0.4,
+            size=point_size / 10,
+            jitter=True,
+            alpha=0.55
+        )
+
+    # 5) mean bar + label -----------------------------------------
+    for idx, ct in enumerate(order):
+        mean_val = frac[ct].mean()
+        plt.plot([idx - 0.25, idx + 0.25], [mean_val, mean_val],
+                 color="darkgrey", linewidth=2)
+        plt.text(idx, mean_val + 0.02, f"{mean_val:.2f}",
+                 ha="center", va="bottom",
+                 fontsize=mean_fs, color="red")
+
+    plt.xticks(rotation=90)
+    plt.ylabel("Fraction")
+    plt.xlabel("Cell type")
+    plt.title("Distribution of Cell‑type Abundances Across Samples")
+    plt.tight_layout()
+    plt.show()
+
+
 
 def Heatmap_GEX(Statescope_model, celltype):
     """
@@ -1077,7 +1458,7 @@ def BarPlot_StateLoadings(Statescope_model, top_genes=1):
         cell_type = '_'.join(state.split('_')[:-1])
         state_number = int(state.split('_')[-1])  # Convert state number to integer
         # Get top genes for the state
-        top_gene_values = state_loadings[state].abs().nlargest(top_genes)
+        top_gene_values = state_loadings[state].nlargest(top_genes)
         for gene, coeff in top_gene_values.items():
             bar_data.append((cell_type, state, state_number, coeff, gene))
 
