@@ -78,10 +78,6 @@ class Statescope:
 
         self.isDeconvolutionDone = False
         self.isRefinementDone = False
-<<<<<<< HEAD
-        self.isStateDiscoveryDone = False
-        self.isEcoTypeDiscoveryDone = False
-=======
         self.isStateDiscoveryDone = False        
         self.isEcoTypeDiscoveryDone = False
         
