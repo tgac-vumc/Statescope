@@ -345,7 +345,7 @@ class Statescope:
         # 1) run cNMF / EcoTypeDiscovery               
         print('Performing cNMF EcoType Discovery')
         model, coph = EcoTypeDiscovery_FrameWork(
-                self.StateScores,
+                Extract_StateScores(self),
                 K,                 # may be None → auto
                 n_iter,
                 n_final_iter,
@@ -353,22 +353,22 @@ class Statescope:
                 max_clusters,
                 self.Ncores)
         
-        EcoType_dict = model
+        EcoType_cNMF = model
         EcoType_CopheneticCoefficients = coph
         EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
         EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
              
         # 2) stash results in the object                               
         if not hasattr(self, 'EcoType_cNMF'):
-            self.EcoType_cNMF                   = EcoType_dict
+            self.EcoType_cNMF                   = EcoType_cNMF
             self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
             self.EcoTypeScores            = EcoTypeScores
             self.EcoTypeLoadings          = EcoTypeLoadings
             self.isEcoTypeDiscoveryDone   = True
         else:
-            self.EcoType_cNMF.update(EcoType_dict)
-            self.EcoTypeScores.update(EcoTypeScores)
-            self.EcoTypeLoadings.update(EcoTypeLoadings)
+            self.EcoType_cNMF = EcoType_cNMF
+            self.EcoTypeScores = EcoTypeScores
+            self.EcoTypeLoadings = EcoTypeLoadings
             
         print("EcoTypeDiscovery completed successfully.")
 
@@ -504,9 +504,9 @@ def Extract_StateScores(Statescope_model, celltype = None):
 
     # Extract the StateScores DataFrame
     if celltype == None:
-        state_loadings = pd.concat(Statescope_model.StateScores.values(), axis=1)
+        state_scores = pd.concat(Statescope_model.StateScores.values(), axis=1)
     else:
-        state_loadings = Statescope_model.StateScores[celltype]
+        state_scores = Statescope_model.StateScores[celltype]
 
     # Verify the DataFrame is not empty
     if state_scores.empty:
@@ -987,7 +987,6 @@ def Plot_CopheneticCoefficients(Statescope_model, show = True, fname = None):
             "CopheneticCoefficients are not available. "
             "Run StateDiscovery first."
         )
-
     # number of states retained for each cell type, derived from StateScores
     chosen_K = {
         ct: len(Statescope_model.StateScores[ct].columns) for ct in Statescope_model.CopheneticCoefficients.keys()
