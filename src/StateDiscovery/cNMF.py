@@ -147,7 +147,7 @@ def StateRetrieval(GEX,Omega,celltype,StateLoadings,weighing = 'Omega',Fractions
     return StateScores
 
 
-def EcoTypeDiscovery_FrameWork(Statescores,
+def EcoTypeDiscovery_FrameWork(state_scores,
         K=None,
         n_iter=10,
         n_final_iter=100,
@@ -172,14 +172,9 @@ def EcoTypeDiscovery_FrameWork(Statescores,
               cophenetic coefficients if a sweep was run, otherwise the single
               final coefficient.
     """
-    # build the concatenated statescore matrix
-    Statescores_concat = pd.DataFrame()    
-    for ct in Statescores.keys():
-        Statescores_concat = pd.concat([Statescores_concat, Statescores[ct]], axis =1)
-    
-    Statescores_concat = Statescores_concat.to_numpy() ## Convert for further use
-    print(Statescores_concat)
-    print(Statescores_concat.shape)
+     # Make numpy array from statescores
+    state_scores = state_scores.to_numpy()
+                
     data_dict   = {}         
     sweep_curve = None        # list of cophenetic coefficients if we sweep
     
@@ -190,7 +185,7 @@ def EcoTypeDiscovery_FrameWork(Statescores,
         print(f'A value of K is automatically selected between 2 and {max_clusters}')
         for k in range(2, max_clusters):
             print(f'Running initial cNMF ({n_iter} iterations) with K={k}')
-            cNMF_model_k, cophcor_k, consensus_k = cNMF(Statescores_concat, k, n_iter, Ncores)
+            cNMF_model_k, cophcor_k, consensus_k = cNMF(state_scores, k, n_iter, Ncores)
 
             
             
@@ -218,7 +213,7 @@ def EcoTypeDiscovery_FrameWork(Statescores,
     print(f'The selected value for K is {nclust}')
     print(f'Running final cNMF ({n_final_iter} iterations) with K={nclust}')
     cNMF_model, cophcors_final, consensus_matrix = \
-        cNMF(Statescores_concat, nclust, n_final_iter, Ncores)
+        cNMF(state_scores, nclust, n_final_iter, Ncores)
     
     
     # 3) return 
