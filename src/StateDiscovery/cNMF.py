@@ -148,7 +148,6 @@ def StateRetrieval(GEX,Omega,celltype,StateLoadings,weighing = 'Omega',Fractions
 
 
 def EcoTypeDiscovery_FrameWork(Statescores,
->>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
         K=None,
         n_iter=10,
         n_final_iter=100,
