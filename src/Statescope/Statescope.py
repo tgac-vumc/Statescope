@@ -314,7 +314,6 @@ class Statescope:
         raise TypeError(
             f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}"
         )
->>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
 
 
     def Deconvolution(self, Ind_Marker=None,
@@ -594,11 +593,7 @@ class Statescope:
         # 1) run cNMF / EcoTypeDiscovery               
         print('Performing cNMF EcoType Discovery')
         model, coph = EcoTypeDiscovery_FrameWork(
-<<<<<<< HEAD
                 Extract_StateScores(self),
-=======
-                self.StateScores,
->>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
                 K,                 # may be None → auto
                 n_iter,
                 n_final_iter,
@@ -606,37 +601,23 @@ class Statescope:
                 max_clusters,
                 self.Ncores)
         
-<<<<<<< HEAD
         EcoType_cNMF = model
-=======
-        EcoType_dict = model
->>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
         EcoType_CopheneticCoefficients = coph
         EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
         EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
              
         # 2) stash results in the object                               
         if not hasattr(self, 'EcoType_cNMF'):
-<<<<<<< HEAD
             self.EcoType_cNMF                   = EcoType_cNMF
-=======
-            self.EcoType_cNMF                   = EcoType_dict
->>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
             self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
             self.EcoTypeScores            = EcoTypeScores
             self.EcoTypeLoadings          = EcoTypeLoadings
             self.isEcoTypeDiscoveryDone   = True
         else:
-<<<<<<< HEAD
             self.EcoType_cNMF = EcoType_cNMF
             self.EcoTypeScores = EcoTypeScores
             self.EcoTypeLoadings = EcoTypeLoadings
-=======
-            self.EcoType_cNMF.update(EcoType_dict)
-            self.EcoTypeScores.update(EcoTypeScores)
-            self.EcoTypeLoadings.update(EcoTypeLoadings)
->>>>>>> 312bee5ef242c70386ca447ce5c5ffff6cfa4cf5
-            
+
         print("EcoTypeDiscovery completed successfully.")
 
 
