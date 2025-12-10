@@ -32,7 +32,7 @@ from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
 from BLADE_Deconvolution.BLADE import Framework_Iterative, Purify_AllGenes
-from StateDiscovery.cNMF import StateDiscovery_FrameWork
+from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval, EcoTypeDiscovery_FrameWork
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
@@ -320,53 +320,14 @@ class Statescope:
         IterMax=1000,
         *,
         warm_start: bool = False,
-        adam_params: dict = None,  # NEW
-        lbfgs_params: dict = None,  # NEW
-        backend: str = "auto",  # NEW: "auto" | "gpu" | "cpu"
-        threads_per_job: int | None = None,  # NEW: per-process CPU threads
+        adam_params: dict = None,
+        lbfgs_params: dict = None,
+        backend: str = "auto",
+        threads_per_job: int | None = None,
+        collect_logs: bool = False,   # <---- NEW
     ):
         """
         Perform BLADE Deconvolution
-
-        Parameters
-        ----------
-        Alpha, Alpha0, Kappa0, sY : BLADE hyperparameters
-        Nrep : int
-            Number of BLADE initializations (replicates).
-        Njob : int
-            Number of parallel workers (processes). On GPU, best set to #GPUs.
-        fsel : float
-            Feature selection threshold (unchanged).
-        Update_SigmaY : bool
-            Whether to iteratively update SigmaY (experimental).
-        Init_Trust : int
-            Weight for initial expected fractions.
-        Expectation : np.ndarray or dict
-            Prior expectation of fractions (Nsample, Ncell).
-        Temperature : None or [Tmin, Tmax]
-            Simulated annealing schedule (experimental).
-        IterMax : int
-            Max outer iterations.
-
-        warm_start : bool
-            Use Adam warm-up before L-BFGS (unchanged).
-        adam_params, lbfgs_params : dict
-            Optimizer knobs (unchanged).
-
-        backend : {"auto","gpu","cpu"}, default "auto"
-            - "gpu": one process per GPU (recommended on multi-GPU)
-            - "cpu": Njob processes × threads_per_job threads each
-            - "auto": pick "gpu" if CUDA visible; otherwise "cpu"
-
-        threads_per_job : int or None
-            Per-process CPU threads (used only when backend="cpu").
-            If None, Framework_Iterative will auto-split available cores.
-
-        Returns
-        -------
-        Populates:
-            self.BLADE : BLADE object (best replicate)
-            self.Fractions : pd.DataFrame (posterior fractions)
         """
 
         # Prepare Signature with markers only
@@ -378,9 +339,16 @@ class Statescope:
         scExp_celltypes = [ct.replace("scExp_", "") for ct in self.scExp.columns]
         scVar_celltypes = [ct.replace("scVar_", "") for ct in self.scVar.columns]
 
-        Expectation = Check_Expectation_validity(Expectation, celltype_order=scExp_celltypes, sample_names=self.Samples)
+        Expectation = Check_Expectation_validity(
+            Expectation,
+            celltype_order=scExp_celltypes,
+            sample_names=self.Samples
+        )
 
-        final_obj, best_obj, best_set, outs = Framework_Iterative(
+        # ----------------------------------------
+        # RUN FRAMEWORK
+        # ----------------------------------------
+        out = Framework_Iterative(
             scExp_marker,
             scVar_marker,
             Y,
@@ -400,67 +368,114 @@ class Statescope:
             warm_start=warm_start,
             adam_params=adam_params,
             lbfgs_params=lbfgs_params,
-            backend=backend,  # <- NEW
+            backend=backend,
             threads_per_job=threads_per_job,
-        )  # <- NEW
-
-        # Save BLADE result in Statescope object
-        self.BLADE = final_obj
-        # Save fractions as dataframe in object
-        self.Fractions = pd.DataFrame(
-            final_obj.ExpF(final_obj.Beta).detach().cpu().numpy(), index=self.Samples, columns=self.Celltypes
+            collect_logs=collect_logs,          # <---- ENABLE LOGGING
         )
 
-        ###This one is for old oncoblade application
-        # self.Fractions =  pd.DataFrame(final_obj.ExpF(final_obj.Beta), index=self.Samples, columns=self.Celltypes)
+        # ----------------------------------------
+        # HANDLE RETURN SHAPE
+        # ----------------------------------------
+
+        if collect_logs:
+            # New dictionary return
+            final_obj = out["best_model"]
+            best_conv = out["best_conv"]
+            best_set = list(zip(out["all_models"], out["all_elbos"]))
+            outs = out["all_models"]
+            self.deconv_logs = out          # <---- SAVE EVERYTHING HERE
+        else:
+            # Classic 4-tuple return
+            final_obj, best_conv, best_set, outs = out
+            self.deconv_logs = None         # <--- no logs
+
+        # ----------------------------------------
+        # Save core outputs like before
+        # ----------------------------------------
+
+        self.BLADE = final_obj
+
+        self.Fractions = pd.DataFrame(
+            final_obj.ExpF(final_obj.Beta).detach().cpu().numpy(),
+            index=self.Samples,
+            columns=self.Celltypes,
+        )
+
         self.isDeconvolutionDone = True
         print("Deconvolution completed successfully.")
 
-        # Check convergence flag and print message accordingly
-        # Convert to a Python boolean if needed
         if self.BLADE.log:
             print("Model converged.")
         else:
             print("Warning: Model did not converge, estimates might not be optimal.")
 
-    # Perform Gene Expression Refinement
-    def Refinement(self, weight=100, GeneList=None):
-        """
-        Perform Gene expression refinement with all genes
-        :param Statescope self: Statescope
-        :param int weight: Parameter to weigh down fraction estimation objective [default = 100]
-        :param list GeneList: Genes to use for refinement [default = None, all genes]
+        return final_obj   # unchanged for external scripts
 
-        :returns: BLADE_Object self.BLADE_final: BLADE object
-        :returns: {ct:pandas.DataFrame} self.GEX: Dictionary of cell type specific GEX {ct:ctSpecificGEX}
+
+    # Perform Gene Expression Refinement
+    def Refinement(self, weight=100, GeneList=None, njob=10):
         """
+        Perform Gene expression refinement with all genes.
+        """
+
         if not self.isDeconvolutionDone:
             raise Exception("Deconvolution must be completed before Refinement.")
 
+        # ------------------------
+        # Subset genes
+        # ------------------------
         if GeneList:
             self.Genes = [gene for gene in self.Genes if gene in GeneList]
-        # Prepare Signature
-        scExp_All = self.scExp.loc[self.Genes, :].to_numpy()
-        scVar_All = self.scVar.loc[self.Genes, :].to_numpy()
-        # Prepare Bulk (select/match genes)
-        Y = self.Bulk.loc[self.Genes, self.Samples].to_numpy()
-        # Perform gene expression refinement with all genes in signature
-        obj = Purify_AllGenes(self.BLADE, scExp_All, scVar_All, Y, self.Ncores, weight)
-        # create output GEX dictionary
-        GEX = {
-            ct: pd.DataFrame(obj.Nu[:, :, i], index=self.Samples, columns=self.Genes)
-            for i, ct in enumerate(self.Celltypes)
-        }
-        Omega = {
-            ct: pd.DataFrame(obj.Omega[:, i], index=self.Genes, columns=[ct]) for i, ct in enumerate(self.Celltypes)
-        }
-        # Store in Statescope object
+
+        # Prepare signature matrices
+        scExp_All = self.scExp.loc[self.Genes, :]
+        scVar_All = self.scVar.loc[self.Genes, :]
+
+        # Prepare Bulk (select matched genes)
+        Y = self.Bulk.loc[self.Genes, self.Samples]
+
+        # ------------------------
+        # RUN PURIFICATION
+        # ------------------------
+        obj, total_trace = Purify_AllGenes(
+            self.BLADE,
+            scExp_All,
+            scVar_All,
+            Y,
+            Ncores=njob,
+            weight=weight,
+            iters=1000,
+            minDiff=1e-4,
+            update_sigmaY=False,
+        )
+
+        # ------------------------
+        # BUILD OUTPUT GEX DICTIONARY
+        # ------------------------
+        GEX = {}
+        for i, ct in enumerate(self.Celltypes):
+            # obj.Nu[:, :, i] shape = (Samples, Genes)
+            mat = obj.Nu[:, :, i].detach().cpu().numpy()
+            GEX[ct] = pd.DataFrame(mat, index=self.Samples, columns=self.Genes)
+
+        # ------------------------
+        # BUILD OUTPUT OMEGA
+        # ------------------------
+        Omega = {}
+        for i, ct in enumerate(self.Celltypes):
+            vec = obj.Omega[:, i].detach().cpu().numpy()
+            Omega[ct] = pd.DataFrame(vec, index=self.Genes, columns=[ct])
+
+        # ------------------------
+        # STORE IN OBJECT
+        # ------------------------
         self.BLADE_final = obj
         self.GEX = GEX
         self.Omega = Omega
-
         self.isRefinementDone = True
+
         print("Refinement completed successfully.")
+
 
     def StateDiscovery(
         self,
@@ -597,6 +612,81 @@ class Statescope:
             self.StateLoadings.update(StateLoadings)
 
         print("StateDiscovery completed successfully.")
+
+    def EcotypeDiscovery(
+        self,
+        K: int | None = None,
+        n_iter: int = 10,
+        n_final_iter: int = 100,
+        min_cophenetic: float = 0.9,
+        max_clusters: int = 10):
+        """
+         
+        Perform EcoTypeDiscovery from StateScores using cNMF.
+
+        :param K: single value of number of states to consider.
+                If None, an optimal K is determined.
+        :param n_iter: Number of initial cNMF restarts.
+        :param n_final_iter: Number of final cNMF restarts.
+        :param min_cophenetic: Minimum cophenetic coefficient to determine K.
+        :param max_clusters: Maximum number of clusters/states to consider.
+
+        :param K : int  None, optional
+            • None   – automatically chooses k  
+            • int    – force k to specific number 
+
+        **Examples**
+
+        >>> Model.EcoTypeDiscovery(K=2)
+        Forces k = 2.
+
+        >>> Model.EcoTypeDiscovery()
+        K picked automatically.
+                
+        """
+        
+        # 0) checks                                         
+        
+        if not self.isStateDiscoveryDone:
+            raise RuntimeError("Run StateDiscovery before EcoTypeDiscovery.")
+        
+        # 1) run cNMF / EcoTypeDiscovery               
+        print('Performing cNMF EcoType Discovery')
+        model, coph = EcoTypeDiscovery_FrameWork(
+                Extract_StateScores(self),
+                K,                 # may be None → auto
+                n_iter,
+                n_final_iter,
+                min_cophenetic,
+                max_clusters,
+                self.Ncores)
+        
+        EcoType_cNMF = model
+        EcoType_CopheneticCoefficients = coph
+        EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
+        EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
+             
+        # 2) stash results in the object                               
+        if not hasattr(self, 'EcoType_cNMF'):
+            self.EcoType_cNMF                   = EcoType_cNMF
+            self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
+            self.EcoTypeScores            = EcoTypeScores
+            self.EcoTypeLoadings          = EcoTypeLoadings
+            self.isEcoTypeDiscoveryDone   = True
+        else:
+            self.EcoType_cNMF = EcoType_cNMF
+            self.EcoTypeScores = EcoTypeScores
+            self.EcoTypeLoadings = EcoTypeLoadings
+
+        print("EcoTypeDiscovery completed successfully.")
+
+
+
+def get_StateNames(self):
+    statenames = list()
+    for ct in self.Celltypes:
+        statenames.extend(self.StateScores[ct].columns.to_list())
+    return(statenames)
 
 
 # -------------------------------------------------------------------------------
