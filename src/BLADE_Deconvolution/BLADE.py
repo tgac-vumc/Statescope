@@ -1738,204 +1738,260 @@ def Framework_Iterative(
         # Original behavior (no logs)
         return out, conv, list(zip(outs, cri)), args
 
+def Purify_OneGene(
+    obj: BLADE,
+    weight: float,
+    iters: int = 1000,
+    minDiff: float = 1e-4,
+    update_sigmaY: bool = False,
+):
+    """
+    CPU: refine a single-gene BLADE mini-model.
+    Matches old numba logic:
+      - Nu, Omega updated
+      - Beta fixed
+    """
+    # Match old numba flags
+    obj.Fix_par["Nu"]    = False   # update Nu
+    obj.Fix_par["Omega"] = False   # update Omega
+    obj.Fix_par["Beta"]  = True    # keep Beta fixed
 
-###############################################################
-# 1.  Purify a single gene (CPU-only mini-model)
-###############################################################
-def Purify_OneGene(obj: BLADE, weight: float, iters: int = 1000,
-                   minDiff: float = 1e-4, update_sigmaY: bool = False):
     trace = []
     with torch.no_grad():
-        elbo = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
-        trace.append(elbo)
+        trace.append(float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)))
 
-    for i in range(1, iters):
+    for _ in range(1, iters):
         obj.Reestimate_Nu(weight=weight)
 
         if update_sigmaY:
             obj.Update_SigmaY()
 
         with torch.no_grad():
-            new_elbo = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
-            trace.append(new_elbo)
+            trace.append(float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)))
 
         if abs(trace[-1] - trace[-2]) < minDiff:
             break
 
     return obj, trace
 
-
-#######################################################################
-# 2.  Vectorized GPU purification (all genes at once)
-#######################################################################
-def Purify_AllGenes_GPU(model: BLADE, weight=100, iters=1000, minDiff=1e-4, update_sigmaY=False):
+def Purify_AllGenes_GPU(
+    model: BLADE,
+    weight: float = 100,
+    iters: int = 1000,
+    minDiff: float = 1e-4,
+    update_sigmaY: bool = False,
+):
     """
-    GPU batched purification:
-      - updates Nu[G,S,C] in place
-      - runs E_step vectorized
-      - MUCH faster than CPU mini-models
+    GPU: refine a full BLADE model (all genes at once).
     """
-    device = model.device
-    G, S, C = model.Ngene, model.Nsample, model.Ncell
+    model.to_device(model.device)
 
-    Nu = model.Nu.clone().to(device)           # (S,G,C)
-    Beta = model.Beta.to(device)               # (S,C)
-    Omega = model.Omega.to(device)             # (G,C)
-    Y = model.Y.to(device)
-    SigmaY = model.SigmaY.to(device)
-
-    # Reshape for vectorized operations
-    Beta_exp = Beta.unsqueeze(1)               # (S,1,C)
-    Omega_exp = Omega.unsqueeze(0).unsqueeze(0) # (1,G,C)
+    # Match numba flags
+    model.Fix_par["Nu"]    = False
+    model.Fix_par["Omega"] = False
+    model.Fix_par["Beta"]  = True
 
     trace = []
-
     with torch.no_grad():
-        elbo = float(model.E_step(Nu, Beta, Omega))
-        trace.append(elbo)
+        trace.append(float(model.E_step(model.Nu, model.Beta, model.Omega)))
 
-    for i in range(1, iters):
+    for _ in range(1, iters):
+        model.Reestimate_Nu(weight=weight)
 
-        # ------------------------------
-        # Vectorized update of Nu:
-        # Nu[s,g,c] = argmax posterior using closed-form update
-        # ------------------------------
-        Numat = Beta_exp * Omega_exp          # (S,G,C)
-        Numat = Numat / (Numat.sum(-1, keepdim=True) + 1e-12)
-
-        Nu = Numat.clone()
-
-        # ------------------------------------------------------
         if update_sigmaY:
-            raise NotImplementedError("SigmaY GPU update not yet implemented.")
+            model.Update_SigmaY()
 
         with torch.no_grad():
-            new_elbo = float(model.E_step(Nu, Beta, Omega))
-            trace.append(new_elbo)
+            trace.append(float(model.E_step(model.Nu, model.Beta, model.Omega)))
 
         if abs(trace[-1] - trace[-2]) < minDiff:
             break
 
-    # Build new model
-    purified = BLADE(
-        Y=Y.cpu(),
-        SigmaY=SigmaY.cpu(),
-        Mu0=model.Mu0.cpu(),
-        Alpha=model.Alpha.cpu(),
-        Alpha0=model.Alpha0.cpu(),
-        Beta0=model.Beta0.cpu(),
-        Kappa0=model.Kappa0.cpu(),
-        Nu_Init=Nu.cpu(),
-        Omega_Init=Omega.cpu(),
-        Beta_Init=Beta.cpu(),
-        device="cpu",
-        fix_Beta=False,
-        fix_Omega=False
-    )
+    return model, trace
 
-    return purified, trace
+
+
 
 def Purify_AllGenes(
-        model: BLADE,
-        scExp_All,
-        scVar_All,
-        Y_bulk,
-        weight: float = 100,
-        iters: int = 1000,
-        minDiff: float = 1e-4,
-        Ncores: int = 4,
-        update_sigmaY: bool = False,
-    ):
+    model: BLADE,
+    scExp_All,
+    scVar_All,
+    Y_bulk,
+    weight: float = 100,
+    iters: int = 1000,
+    minDiff: float = 1e-4,
+    Ncores: int = 4,
+    update_sigmaY: bool = False,
+):
     """
-    Automatically selects:
-      - GPU batch purification  (FAST)
-      - CPU multi-core mini-model purification (SAFE)
-    """
+    Refine gene expression for ALL genes (not just markers).
 
+    scExp_All : (G_all x C)  – full signature means (Mu0)
+    scVar_All : (G_all x C)  – full signature variances (Omega)
+    Y_bulk    : (G_all x S)  – bulk counts for all genes
+
+    Behaviour matches old numba Purify_AllGenes:
+      • Use Beta (fractions) from deconvolution
+      • Rebuild per-gene model with:
+          Mu0  = scExp_All
+          Omega = scVar_All
+          Y = log1p(Y_bulk)
+      • Update Nu & Omega, keep Beta fixed
+    """
     # --------------------------------------------------------
-    # DEVICE SELECTION
+    # 0) Convert inputs to tensors on the appropriate device
     # --------------------------------------------------------
-    # Respect model.device unless CUDA is not usable
-    if model.device.type == "cuda" and not _has_usable_cuda():
-        device = torch.device("cpu")
+    # Determine base device from original model
+    base_device = getattr(model, "device", torch.device("cpu"))
+    if isinstance(base_device, str):
+        base_device = torch.device(base_device)
+
+    # Handle pandas / numpy inputs
+    if isinstance(Y_bulk, pd.DataFrame):
+        Y_np = Y_bulk.to_numpy()
     else:
-        device = torch.device(model.device)
+        Y_np = np.asarray(Y_bulk)
 
-    model.to_device(device)
+    if isinstance(scExp_All, pd.DataFrame):
+        Mu_np = scExp_All.to_numpy()
+    else:
+        Mu_np = np.asarray(scExp_All)
+
+    if isinstance(scVar_All, pd.DataFrame):
+        Omega_np = scVar_All.to_numpy()
+    else:
+        Omega_np = np.asarray(scVar_All)
+
+    # Tensors
+    Y_tensor     = torch.tensor(Y_np, dtype=torch.float32, device=base_device)    # (G x S) counts
+    Mu_tensor    = torch.tensor(Mu_np, dtype=torch.float32, device=base_device)   # (G x C)
+    Omega_tensor = torch.tensor(Omega_np, dtype=torch.float32, device=base_device) # (G x C)
+
+    G, S = Y_tensor.shape
+    G2, C = Mu_tensor.shape
+    assert G == G2, "Mismatch: Y_bulk and scExp_All gene dimension must match."
 
     # --------------------------------------------------------
-    # BRANCH 1: GPU → full vectorized purification
+    # 1) Build full prior parameters (Alpha, Alpha0, Beta0, Kappa0)
+    # --------------------------------------------------------
+    # Fractions prior from original BLADE (same for all genes)
+    Alpha = model.Alpha.to(base_device)        # (S x C)
+    Beta  = model.Beta.to(base_device)         # (S x C)
+
+    # Derive scalar Alpha0, Kappa0 from existing model (approx numba behaviour)
+    # Old numba Purify_AllGenes used: Alpha0 (scalar), Kappa0 (scalar), Beta0 = Alpha0 * Omega^2
+    if hasattr(model, "Alpha0") and model.Alpha0 is not None:
+        alpha0_scalar = float(model.Alpha0.detach().cpu().mean())
+    else:
+        alpha0_scalar = 1000.0
+
+    if hasattr(model, "Kappa0") and model.Kappa0 is not None:
+        kappa0_scalar = float(model.Kappa0.detach().cpu().mean())
+    else:
+        kappa0_scalar = 1.0
+
+    Alpha0 = torch.full((G, C), alpha0_scalar, dtype=torch.float32, device=base_device)
+    Beta0  = Alpha0 * (Omega_tensor ** 2)
+    Kappa0 = torch.full((G, C), kappa0_scalar, dtype=torch.float32, device=base_device)
+
+    # --------------------------------------------------------
+    # 2) Build log-transformed Y and SigmaY (like old numba)
+    # --------------------------------------------------------
+    logY = torch.log1p(Y_tensor)          # (G x S), same as np.log(Y+1)
+
+    # SigmaY: std over samples per gene, tiled across samples
+    std_per_gene = torch.std(logY, dim=1, keepdim=True)   # (G x 1)
+    SigmaY = std_per_gene.repeat(1, S) + 0.1              # sY = 1.0
+
+    # --------------------------------------------------------
+    # 3) Initial Nu: for each sample, all genes start at Mu (signature mean)
+    # --------------------------------------------------------
+    Nu_Init = torch.zeros((S, G, C), dtype=torch.float32, device=base_device)
+    for s in range(S):
+        Nu_Init[s, :, :] = Mu_tensor
+
+    # --------------------------------------------------------
+    # 4) Build a FULL-GENE BLADE model (like old BLADE_numba)
+    # --------------------------------------------------------
+    full_model = BLADE(
+        Y=logY,
+        SigmaY=SigmaY,
+        Mu0=Mu_tensor,
+        Alpha=Alpha,
+        Alpha0=Alpha0,
+        Beta0=Beta0,
+        Kappa0=Kappa0,
+        Nu_Init=Nu_Init,
+        Omega_Init=Omega_tensor,
+        Beta_Init=Beta,
+        fix_Beta=True,        # fractions fixed during purification
+        fix_Omega=False,
+        device=base_device,
+    )
+
+    # --------------------------------------------------------
+    # 5) Device selection
+    # --------------------------------------------------------
+    if full_model.device.type == "cuda" and _has_usable_cuda():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    full_model.to_device(device)
+
+    # --------------------------------------------------------
+    # 6) GPU path → full vectorised purification
     # --------------------------------------------------------
     if device.type == "cuda":
-        print("[Purification] GPU detected → using batched vectorized purification.")
-
-        return Purify_AllGenes_GPU(
-            model,
-            scExp_All=scExp_All,
-            scVar_All=scVar_All,
-            Y=Y_bulk,
+        print("[Purification] GPU mode → batched purification on ALL genes.")
+        purified_gpu, trace = Purify_AllGenes_GPU(
+            full_model,
             weight=weight,
             iters=iters,
             minDiff=minDiff,
             update_sigmaY=update_sigmaY,
         )
+        return purified_gpu, trace
 
     # --------------------------------------------------------
-    # BRANCH 2: CPU → per-gene mini-model parallelization
+    # 7) CPU path → per-gene mini-models
     # --------------------------------------------------------
-    print(f"[Purification] CPU mode detected → {Ncores} parallel workers.")
+    print(f"[Purification] CPU mode → {Ncores} parallel workers on ALL genes.")
 
-    # Pull references
-    Y = model.Y
-    SigmaY = model.SigmaY
-    Mu0 = model.Mu0
-    Omega = model.Omega
-    Beta = model.Beta
-    Alpha = model.Alpha
-    Alpha0 = model.Alpha0
-    Beta0 = model.Beta0
-    Kappa0 = model.Kappa0
+    # Use CPU tensors for mini models
+    Y_cpu      = full_model.Y.cpu()
+    SigmaY_cpu = full_model.SigmaY.cpu()
+    Mu0_cpu    = full_model.Mu0.cpu()
+    Omega_cpu  = full_model.Omega.cpu()
+    Alpha_cpu  = full_model.Alpha.cpu()
+    Alpha0_cpu = full_model.Alpha0.cpu()
+    Beta0_cpu  = full_model.Beta0.cpu()
+    Kappa0_cpu = full_model.Kappa0.cpu()
+    Beta_cpu   = full_model.Beta.cpu()
+    Nu_cpu     = full_model.Nu.cpu()
 
-    G = model.Ngene
-    S = model.Nsample
-    C = model.Ncell
+    G_cpu, S_cpu = Y_cpu.shape
+    _, C_cpu     = Mu0_cpu.shape
 
-    # --------------------------------------------------------
-    # Build mini BLADE models (each N_gene=1)
-    # --------------------------------------------------------
     mini_objs = []
-
-    for g in range(G):
-        gY     = Y[g, :].unsqueeze(0)        # (1, S)
-        gSigma = SigmaY[g, :].unsqueeze(0)   # (1, S)
-        gMu    = Mu0[g, :].unsqueeze(0)      # (1, C)
-        gOmega = Omega[g, :].unsqueeze(0)    # (1, C)
-        gBeta0 = Beta0[g, :].unsqueeze(0)    # (1, C)
-        gAlpha0 = Alpha0[g, :].unsqueeze(0)  # (1, C)
-        gKappa0 = Kappa0[g, :].unsqueeze(0)  # (1, C)   <-- FIXED!!
-        gNu = model.Nu[:, g, :].unsqueeze(1) # (S,1,C)
-
+    for g in range(G_cpu):
         mini = BLADE(
-            Y=gY,
-            SigmaY=gSigma,
-            Mu0=gMu,
-            Alpha=Alpha,
-            Alpha0=gAlpha0,
-            Beta0=gBeta0,
-            Kappa0=gKappa0,
-            Nu_Init=gNu,
-            Omega_Init=gOmega,
-            Beta_Init=Beta,
-            fix_Beta=True,
-            fix_Omega=True,
+            Y=Y_cpu[g, :].unsqueeze(0),          # (1 x S)
+            SigmaY=SigmaY_cpu[g, :].unsqueeze(0),# (1 x S)
+            Mu0=Mu0_cpu[g, :].unsqueeze(0),      # (1 x C)
+            Alpha=Alpha_cpu,                     # (S x C)
+            Alpha0=Alpha0_cpu[g, :].unsqueeze(0),# (1 x C)
+            Beta0=Beta0_cpu[g, :].unsqueeze(0),  # (1 x C)
+            Kappa0=Kappa0_cpu[g, :].unsqueeze(0),# (1 x C)
+            Nu_Init=Nu_cpu[:, g, :].unsqueeze(1),# (S x 1 x C)
+            Omega_Init=Omega_cpu[g, :].unsqueeze(0), # (1 x C)
+            Beta_Init=Beta_cpu,                  # (S x C)
+            fix_Beta=True,                       # EXACT: same as numba
+            fix_Omega=False,
             device="cpu",
         )
-
         mini_objs.append(mini)
 
-    # --------------------------------------------------------
-    # Parallel purification
-    # --------------------------------------------------------
     outs = Parallel(n_jobs=int(Ncores), verbose=10)(
         delayed(Purify_OneGene)(obj, weight, iters, minDiff, update_sigmaY)
         for obj in mini_objs
@@ -1944,42 +2000,38 @@ def Purify_AllGenes(
     purified_objs, traces = zip(*outs)
 
     # --------------------------------------------------------
-    # Recombine purified components
+    # 8) Reassemble purified tensors into a single BLADE model
     # --------------------------------------------------------
-    new_Nu    = torch.zeros_like(model.Nu)
-    new_Omega = torch.zeros_like(model.Omega)
-    new_Sigma = torch.zeros_like(model.SigmaY)
+    new_Nu    = torch.zeros_like(Nu_cpu)        # (S x G x C)
+    new_Omega = torch.zeros_like(Omega_cpu)     # (G x C)
+    new_Sigma = torch.zeros_like(SigmaY_cpu)    # (G x S)
 
     for g, obj in enumerate(purified_objs):
-        new_Nu[:, g, :] = obj.Nu.squeeze(1)
-        new_Omega[g, :] = obj.Omega.squeeze(0)
-        new_Sigma[g, :] = obj.SigmaY.squeeze(0)
+        new_Nu[:, g, :] = obj.Nu.squeeze(1)         # (S x C)
+        new_Omega[g, :] = obj.Omega.squeeze(0)      # (C,)
+        new_Sigma[g, :] = obj.SigmaY.squeeze(0)     # (S,)
 
-    # --------------------------------------------------------
-    # Construct final purified model
-    # --------------------------------------------------------
     purified = BLADE(
-        Y=Y,
+        Y=Y_cpu,
         SigmaY=new_Sigma,
-        Mu0=Mu0,
-        Alpha=Alpha,
-        Alpha0=Alpha0,
-        Beta0=Beta0,
-        Kappa0=Kappa0,
+        Mu0=Mu0_cpu,
+        Alpha=Alpha_cpu,
+        Alpha0=Alpha0_cpu,
+        Beta0=Beta0_cpu,
+        Kappa0=Kappa0_cpu,
         Nu_Init=new_Nu,
         Omega_Init=new_Omega,
-        Beta_Init=Beta,
+        Beta_Init=Beta_cpu,
         device="cpu",
         fix_Beta=False,
         fix_Omega=False,
     )
 
     # --------------------------------------------------------
-    # Aggregate ELBO traces
+    # 9) Aggregate ELBO traces across genes
     # --------------------------------------------------------
     maxlen = max(len(t) for t in traces)
     total_trace = np.zeros(maxlen)
-
     for t in traces:
         total_trace[:len(t)] += np.array(t)
 
