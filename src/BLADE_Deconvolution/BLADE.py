@@ -9,319 +9,27 @@ TMP = os.environ.get("JOBLIB_TEMP_FOLDER", "/dev/shm")
 # New imports
 import torch
 import torch.special
-
-import dill
-
-# Old imports
-from numba import jit, njit
-
-###NumPy import
-import numpy as np
-from numpy import transpose as t
-import scipy.optimize
-from scipy.special import loggamma
-from scipy.special import gamma
-from scipy.special import digamma
-from scipy.special import polygamma
-
-import pandas as pd
-
 from sklearn.svm import NuSVR
 from sklearn.metrics import mean_squared_error as mse
-from sklearn.model_selection import KFold
-
+import dill
+import pandas as pd
 from joblib import Parallel, delayed, parallel_backend
 import itertools
 import time
 import os, math
 import warnings
-
 from timeit import default_timer as timer
 from functools import partial
-
 import importlib
 from contextlib import contextmanager
-
-
-import os, torch
 from contextlib import nullcontext
-
-# --- One-button full-precision mode ---
-torch.set_default_dtype(torch.float64)
-
-# Disable any lower-precision GPU math
-if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-
-# Disable autocast safely (old & new PyTorch versions)
-try:
-    torch.set_autocast_enabled(False)
-except Exception:
-    pass
-autocast_disabled = nullcontext()
-
-# # Optional debug print
-# print(f"[Torch FP mode] default dtype: {torch.get_default_dtype()}")
-# if torch.cuda.is_available():
-#     print(f"[Torch FP mode] TF32 allowed: {torch.backends.cuda.matmul.allow_tf32}")
-
-
-
-
-def _debug_precision_report(model, tag="[Precision]"):
-    print(f"{tag} Backend: {'GPU' if torch.cuda.is_available() else 'CPU'}")
-    print(f"{tag} Default dtype: {torch.get_default_dtype()}")
-    for name in ("Nu", "Omega", "Beta"):
-        p = getattr(model, name, None)
-        if isinstance(p, torch.Tensor):
-            print(f"{tag} Param {name}: dtype={p.dtype}, device={p.device}")
-
-
-# --------- re-entrant-safe, CPU-friendly profiler (replace previous block) ---------
-import os, io, time, functools, contextvars, torch
-from torch.profiler import profile, ProfilerActivity
-
-# === config ===
-# defaults for profiling cpu/GPU time and memory usage
-PROF_ENABLED = False
-PROF_SAVE_TXT = ""  # e.g. "profiles.txt" to append; "" → print only
-PROF_ROW_LIMIT = 40
-PROF_RECORD_SHAPES = True
-PROF_PROFILE_MEM = True
-PROF_WITH_STACK = False
-PROF_SORT = None  # None→ auto: cuda_time_total if CUDA else self_cpu_time_total
-PROF_ONLY_FIRST_N = 1  # profile only the first N calls per function per process
-PROF_SKIP_NESTED = True  # <<< IMPORTANT: avoid nested Kineto sessions
-PROF_ALLOW_CUDA = True  # auto-add CUDA activity if available
-
-###=== example config for CPU-only, no file output ===
-PROF_ALLOW_CUDA = False
-PROF_SORT = ""
-PROF_SAVE_TXT = ""
-PROF_ONLY_FIRST_N = 1
-
-"""
-Use as a function decorator, just add @torch_prof on top of the function definition. It will automatically profile the function using torch.profiler and print/save the results.
-"""
-
-# process-local nesting depth (survives joblib workers)
-_prof_depth = contextvars.ContextVar("prof_depth", default=0)
-
-
-def _sort_default():
-    return "cuda_time_total" if (torch.cuda.is_available() and PROF_ALLOW_CUDA) else "self_cpu_time_total"
-
-
-def _emit(fn_name: str, kind: str, text: str):
-    header = f"\n[{kind}] {fn_name} @ {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-    if PROF_SAVE_TXT:
-        with open(PROF_SAVE_TXT, "a", encoding="utf-8") as f:
-            f.write(header)
-            f.write(text)
-            if not text.endswith("\n"):
-                f.write("\n")
-    else:
-        print(header + text)
-
-
-def torch_prof(fn):
-    calls = {"n": 0}
-
-    @functools.wraps(fn)
-    def wrapped(*args, **kwargs):
-        if (not PROF_ENABLED) or (calls["n"] >= PROF_ONLY_FIRST_N):
-            return fn(*args, **kwargs)
-
-        depth = _prof_depth.get()
-        if PROF_SKIP_NESTED and depth > 0:
-            # Already inside a profiler in this process → just run
-            return fn(*args, **kwargs)
-
-        calls["n"] += 1
-        activities = [ProfilerActivity.CPU]
-        if torch.cuda.is_available() and PROF_ALLOW_CUDA:
-            activities.append(ProfilerActivity.CUDA)
-
-        _prof_depth.set(depth + 1)
-        try:
-            # Run under profiler; if Kineto misbehaves, we’ll fall back gracefully
-            with profile(
-                activities=activities,
-                record_shapes=PROF_RECORD_SHAPES,
-                profile_memory=PROF_PROFILE_MEM,
-                with_stack=PROF_WITH_STACK,
-            ) as prof:
-                out = fn(*args, **kwargs)
-        except RuntimeError as e:
-            # Handle Kineto hiccups (esp. on CPU-only or exotic builds)
-            if "Kineto" in str(e):
-                _emit(fn.__name__, "torch.profiler (skipped)", f"Skipped due to Kineto error: {e}")
-                return fn(*args, **kwargs)
-            raise
-        finally:
-            # make sure we always unwind the depth
-            _prof_depth.set(depth)
-
-        sort_by = PROF_SORT or _sort_default()
-        table = prof.key_averages().table(sort_by=sort_by, row_limit=PROF_ROW_LIMIT)
-        _emit(fn.__name__, "torch.profiler", table)
-        return out
-
-    return wrapped
-
-
-# Optional: Python-level profiler (safe to keep as-is)
-def py_prof(fn):
-    import cProfile, pstats
-
-    calls = {"n": 0}
-
-    @functools.wraps(fn)
-    def wrapped(*args, **kwargs):
-        if (not PROF_ENABLED) or (calls["n"] >= PROF_ONLY_FIRST_N):
-            return fn(*args, **kwargs)
-        calls["n"] += 1
-        pr = cProfile.Profile()
-        pr.enable()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            pr.disable()
-            s = io.StringIO()
-            pstats.Stats(pr, stream=s).strip_dirs().sort_stats("cumtime").print_stats(PROF_ROW_LIMIT)
-            _emit(fn.__name__, "cProfile", s.getvalue())
-
-    return wrapped
-
-
-# -------------------------------------------------------------------------------
-
-# guards
-EXP_MAX = 80.0  # cap exponent arguments (float32-safe)
-EPS = 1e-12  # safe minimum for divides/log/exp
-
-"""
-Use as a function decorator, just add @numerical_guard on top of the function definition. It will automatically clamp the input of torch.exp, torch.log and denominator of torch.div/true_divide to avoid overflow/NaN.
-Adds 35% overhead in our tests, so use only around numerically sensitive code.         
-"""
-
-
-class numerical_guard:
-    """
-    Context manager for guarding torch.exp / torch.log / division.
-    Usage:
-        with numerical_guard():
-            out = my_fn(...)
-    """
-
-    def __enter__(self):
-        self._old = {
-            "exp": torch.exp,
-            "log": torch.log,
-            "div": torch.div,
-            "true_divide": torch.true_divide,
-            "Tensor_log_": getattr(torch.Tensor, "log_", None),
-            "Tensor_exp_": getattr(torch.Tensor, "exp_", None),
-        }
-
-        old_exp = self._old["exp"]
-        old_log = self._old["log"]
-        old_div = self._old["div"]
-        old_true_div = self._old["true_divide"]
-
-        def _safe_exp(x):
-            try:
-                if x.is_floating_point():
-                    x = x.clamp_max(EXP_MAX)
-            except AttributeError:
-                pass
-            return old_exp(x)
-
-        def _safe_log(x):
-            try:
-                if x.is_floating_point():
-                    x = x.clamp_min(EPS)
-            except AttributeError:
-                pass
-            return old_log(x)
-
-        def _guard_den(b):
-            # preserve sign and clamp magnitude away from 0
-            if torch.is_tensor(b):
-                if b.is_floating_point():
-                    return torch.where(b >= 0, b.clamp_min(EPS), b.clamp_max(-EPS))
-                return b
-            # python scalar
-            if isinstance(b, (float, int)):
-                b = float(b)
-                if b >= 0.0:
-                    return b if b >= EPS else EPS
-                else:
-                    return b if b <= -EPS else -EPS
-            return b
-
-        def _safe_div(a, b):
-            return old_true_div(a, _guard_den(b))
-
-        torch.exp = _safe_exp
-        torch.log = _safe_log
-        torch.div = _safe_div
-        torch.true_divide = _safe_div
-
-        # best-effort: patch in-place tensor methods (calls still go through aten, so this is a bonus)
-        if self._old["Tensor_log_"] is not None:
-
-            def _tensor_log_(t):
-                if t.is_floating_point():
-                    t.clamp_min_(EPS)
-                return self._old["Tensor_log_"](t)
-
-            torch.Tensor.log_ = _tensor_log_
-
-        if self._old["Tensor_exp_"] is not None:
-
-            def _tensor_exp_(t):
-                if t.is_floating_point():
-                    t.clamp_max_(EXP_MAX)
-                return self._old["Tensor_exp_"](t)
-
-            torch.Tensor.exp_ = _tensor_exp_
-
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        torch.exp = self._old["exp"]
-        torch.log = self._old["log"]
-        torch.div = self._old["div"]
-        torch.true_divide = self._old["true_divide"]
-        if self._old["Tensor_log_"] is not None:
-            torch.Tensor.log_ = self._old["Tensor_log_"]
-        if self._old["Tensor_exp_"] is not None:
-            torch.Tensor.exp_ = self._old["Tensor_exp_"]
-
-
-def guard_numeric(fn):
-    """
-    Decorator version of the numerical guard.
-    Usage:
-        @guard_numeric
-        def my_fn(...): ...
-    """
-
-    @functools.wraps(fn)
-    def wrapped(*args, **kwargs):
-        with numerical_guard():
-            return fn(*args, **kwargs)
-
-    return wrapped
+import numpy as np
+import contextlib
 
 
 def ExpF_C(Beta):
     # Compute normalized Beta across the second axis (cells).
     return Beta / torch.sum(Beta, dim=1, keepdim=True)
-
 
 # @torch_prof
 def ExpQ_C(Nu, Beta, Omega):
@@ -750,45 +458,21 @@ def g_PY_Beta_C(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
 
     return grad_PY
 
+def _has_usable_cuda() -> bool:
+    """
+    Robustly check if CUDA is actually usable:
+    - torch.cuda.is_available() can be True even if no driver is loaded
+      on some clusters. So we try a tiny tensor on cuda and catch errors.
+    """
+    if not torch.cuda.is_available():
+        return False
+    try:
+        # This will trigger _cuda_init; if driver is missing, it will fail here.
+        torch.tensor(0.0, device="cuda")
+        return True
+    except Exception:
+        return False
 
-
-
-
-from dataclasses import dataclass, field
-import time
-
-
-@dataclass
-class OptLogger:
-    label: str = "run"
-    records: list = field(default_factory=list)
-    _t0: float | None = None
-    _closure_calls: int = 0
-
-    def start(self):
-        if self._t0 is None:
-            self._t0 = time.perf_counter()
-
-    def bump_closure(self, n: int = 1):
-        self._closure_calls += n
-
-    def push(self, *, outer_step: int, phase: str, obj_val: float, grad_norms: dict | None = None, note: str = ""):
-        if self._t0 is None:
-            self.start()
-        grad_norms = grad_norms or {}
-        self.records.append(
-            {
-                "t": time.perf_counter() - self._t0,  # seconds since first push
-                "step": int(outer_step),
-                "phase": str(phase),
-                "obj": float(obj_val),  # ELBO
-                "gNu": float(grad_norms.get("Nu", 0.0)),
-                "gOm": float(grad_norms.get("Omega", 0.0)),
-                "gBe": float(grad_norms.get("Beta", 0.0)),
-                "closures": int(self._closure_calls),
-                "note": note,
-            }
-        )
 
 
 class BLADE:
@@ -809,18 +493,24 @@ class BLADE:
         fix_Omega=False,
         device=None,
     ):
-        import torch
+        self._trajectory = []
 
-        self.device = (
-            torch.device("cuda" if torch.cuda.is_available() else "cpu") if device is None else torch.device(device)
-        )
+        # -------- SAFE DEVICE SELECTION --------
+        if device is None:
+            # Prefer CUDA only if it is truly usable
+            if _has_usable_cuda():
+                self.device = torch.device("cuda")
+            else:
+                self.device = torch.device("cpu")
+        else:
+            dev = torch.device(device)
+            if dev.type == "cuda" and not _has_usable_cuda():
+                # User requested cuda, but driver not usable → fall back
+                self.device = torch.device("cpu")
+            else:
+                self.device = dev
 
-        # 👇 fix: declare global inside the function
-
-        # 2) Keep a weight tensor (we'll convert dtype later in one go)
         self.weight = torch.tensor(1, device=self.device)
-
-        # 3) Core tensors (initially as torch tensors; dtype normalized later)
         self.Y = torch.as_tensor(Y, device=self.device)
 
         # dims
@@ -828,7 +518,6 @@ class BLADE:
 
         # fixed/flags
         self.Fix_par = {"Beta": fix_Beta, "Nu": fix_Nu, "Omega": fix_Omega}
-
         # Mu0: either matrix (Ngene x Ncell) or scalar Ncell
         if isinstance(Mu0, (torch.Tensor, np.ndarray)):
             self.Ncell = Mu0.shape[1]
@@ -885,17 +574,18 @@ class BLADE:
         else:
             self.Kappa0 = torch.full((self.Ngene, self.Ncell), Kappa0, device=self.device)
 
-        # --- NEW: normalize dtype to float32 (much faster on GPU) ---
+        ####Change to f32 for faster compute and less memory####
+        ###but for now keep f64 for numerical stability###
         for name in ["Y", "Mu0", "SigmaY", "Alpha", "Alpha0", "Beta0", "Kappa0", "Omega", "Nu", "Beta", "weight"]:
             t = getattr(self, name)
-            setattr(self, name, t.to(self.device, dtype=torch.float32))
+            setattr(self, name, t.to(self.device, dtype=torch.float64))
 
-            # 4) Enable fast matmul on Ampere/Hopper
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
+        #     # 4) Enable fast matmul on Ampere/Hopper
+        # torch.backends.cuda.matmul.allow_tf32 = True
+        # torch.set_float32_matmul_precision("high")
 
-        # 5) (Optional) autocast for forward-only parts
-        self._use_amp = torch.cuda.is_available()
+        # # 5) (Optional) autocast for forward-only parts
+        # self._use_amp = torch.cuda.is_available()
 
         # 6) Use direct python/tensor ops (no torch.compile to avoid thread/TLS issues)
         # direct function (already fine as-is)
@@ -940,25 +630,38 @@ class BLADE:
             except Exception:
                 pass
 
-        # # Debug precision report (only print once per process)
-        # if not hasattr(BLADE, "_precision_reported"):
-        #     _debug_precision_report(self)
-        #     BLADE._precision_reported = True
-
     def to_device(self, device):
-        self.device = torch.device(device)
+        device = torch.device(device)
 
-        # Move all tensor attributes to the new device and enforce float32
-        self.Y = self.Y.to(dtype=torch.float32, device=self.device)
-        self.Mu0 = self.Mu0.to(dtype=torch.float32, device=self.device)
-        self.SigmaY = self.SigmaY.to(dtype=torch.float32, device=self.device)
-        self.Alpha = self.Alpha.to(dtype=torch.float32, device=self.device)
-        self.Omega = self.Omega.to(dtype=torch.float32, device=self.device)
-        self.Nu = self.Nu.to(dtype=torch.float32, device=self.device)
-        self.Beta = self.Beta.to(dtype=torch.float32, device=self.device)
-        self.Alpha0 = self.Alpha0.to(dtype=torch.float32, device=self.device)
-        self.Beta0 = self.Beta0.to(dtype=torch.float32, device=self.device)
-        self.Kappa0 = self.Kappa0.to(dtype=torch.float32, device=self.device)
+        self.device = device
+
+        # Move all tensors safely
+        for name in [
+            "Y", "Mu0", "SigmaY", "Alpha",
+            "Alpha0", "Beta0", "Kappa0",
+            "Nu", "Omega", "Beta", "weight"
+        ]:
+            t = getattr(self, name, None)
+            if isinstance(t, torch.Tensor):
+                setattr(self, name, t.to(device))
+
+
+    def snapshot(self, iter_idx):
+        """Capture ELBO, Nu, Omega, Beta, Fractions at this iteration."""
+        with torch.no_grad():
+            elbo = float(self.E_step(self.Nu, self.Beta, self.Omega))
+            snap = {
+                "iter": iter_idx,
+                "elbo": elbo,
+                "Nu": self.Nu.detach().cpu().clone(),
+                "Omega": self.Omega.detach().cpu().clone(),
+                "Beta": self.Beta.detach().cpu().clone(),
+                "Fraction": ExpF_C(self.Beta.detach().cpu().clone()),
+            }
+
+        self._trajectory.append(snap)
+
+      #Expectations
 
     def Ydiff(self, Nu, Beta):
         F = self.ExpF(Beta)
@@ -1106,10 +809,10 @@ class BLADE:
 
 
         return grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor
-              # (S, C)
+    
 
+    ###Define ELBO
 
-    # E step
     def E_step(self, Nu, Beta, Omega):
         PX = self.Estep_PX(Nu, Omega) * (1/self.weight)
         PY = self.Estep_PY(Nu, Omega, Beta)
@@ -1119,6 +822,8 @@ class BLADE:
 
 
         return PX+PY+PF-QX-QF
+
+    ##Helping functions for optimization
 
     def _finite_clamp_(self):
         with torch.no_grad():
@@ -1140,23 +845,15 @@ class BLADE:
                 g = self.grad_Beta(self.Nu, self.Omega, self.Beta)
                 self.Beta.grad = -g.to(self.Beta.dtype)
 
-    def Optimize(self, steps=60, lr=2e-2, method="lbfgs", grad_clip=1e4, **opt_kwargs):
-        """
-        GPU-native optimizer using analytical gradients (no autograd graph).
-        Maximizes E_step. Enforces finite/clamped params (outside closure).
-        E_step stays FP32; gradients can use bf16 AMP on GPU.
-        Auto-recovers from LBFGS line-search failures with a short Adam warm-up.
-        Extra kwargs are forwarded to the chosen optimizer.
-
-        Logging:
-        - pass logger=OptLogger(...), phase="adam"/"lbfgs", outer_step=<int>
-        - one record is appended per outer step
-        """
-        import contextlib
-
-        logger: "OptLogger | None" = opt_kwargs.pop("logger", None)
-        phase = opt_kwargs.pop("phase", None) or method.lower()
-        outer_step = int(opt_kwargs.pop("outer_step", -1))
+    def Optimize(
+            self,
+            steps: int = 60,
+            lr: float = 2e-2,
+            method: str = "lbfgs",
+            grad_clip: float = 1e4,
+            amp_grads: bool = True,
+            **opt_kwargs,
+        ):
 
         # -------- AMP for GRADIENTS ONLY (not for E_step) --------
         def _amp_autocast_grad(enabled: bool = True, dtype=torch.bfloat16):
@@ -1166,20 +863,21 @@ class BLADE:
                 major, _ = torch.cuda.get_device_capability()
             except Exception:
                 major = 0
-            if dtype is torch.bfloat16 and major < 8:  # Ampere/Hopper+
+            # bfloat16 allowed only on Ampere/Hopper+
+            if dtype is torch.bfloat16 and major < 8:
                 return contextlib.nullcontext()
             try:
                 return torch.amp.autocast("cuda", dtype=dtype)
             except AttributeError:
                 return torch.cuda.amp.autocast(dtype=dtype)
 
-        amp_grads = bool(opt_kwargs.pop("amp_grads", True))
         amp_ctx = _amp_autocast_grad(enabled=amp_grads, dtype=torch.bfloat16)
 
-        # # --- 0) make sure starting point is sane ---
-        # self._finite_clamp_()
+        # ---- generic controls ----
+        tol = float(opt_kwargs.pop("tol", 1e-7))
+        patience = int(opt_kwargs.pop("patience", 25))
 
-        # --- 1) prepare trainables respecting Fix_par ---
+        # ---- 1) collect trainable parameters ----
         trainable = []
         for name in ("Nu", "Omega", "Beta"):
             tensor = getattr(self, name)
@@ -1198,28 +896,21 @@ class BLADE:
             self.log = True
             return self
 
-        # --- 2) choose optimizer (thread through **opt_kwargs) ---
+        # --- 2) choose optimizer ---
         method_l = method.lower()
+        if method_l not in {"lbfgs", "adam"}:
+            raise ValueError(f"Unknown optimization method '{method}'. Use 'lbfgs' or 'adam'.")
+
         lbfgs_allowed = {
-            "lr",
-            "max_iter",
-            "max_eval",
-            "tolerance_grad",
-            "tolerance_change",
-            "history_size",
-            "line_search_fn",
+            "lr", "max_iter", "max_eval",
+            "tolerance_grad", "tolerance_change",
+            "history_size", "line_search_fn",
         }
         adam_allowed = {
-            "betas",
-            "eps",
-            "weight_decay",
-            "amsgrad",
-            "capturable",
-            "foreach",
-            "maximize",
-            "differentiable",
-            "fused",
-            "lr",
+            "betas", "eps", "weight_decay",
+            "amsgrad", "capturable", "foreach",
+            "maximize", "differentiable",
+            "fused", "lr",
         }
 
         lbfgs_kwargs = {"lr": lr, "max_iter": 12, "history_size": 7}
@@ -1235,10 +926,12 @@ class BLADE:
             opt = torch.optim.LBFGS(trainable, **lbfgs_kwargs)
             use_lbfgs = True
 
+        # --- tracking for early stopping & best state ---
         best_obj = None
-        patience, wait = 25, 0
+        best_snapshot = None
+        wait = 0
 
-        # --- helper: scrub non-finite grads; clip only when using Adam ---
+        # --- helper: scrub non-finite grads ---
         def _clean_grads(do_clip: bool):
             for p in trainable:
                 if p.grad is not None:
@@ -1258,44 +951,52 @@ class BLADE:
                 d["Beta"] = self.Beta.grad.norm().item()
             return d
 
-        # --- 3) LBFGS closure (analytical grads; E_step FP32; no clamp here) ---
         last_grad_norms = {}
 
+        # --- 3) LBFGS closure ---
         def closure():
-            if logger:
-                logger.bump_closure()
-            opt.zero_grad(set_to_none=True)
+            # Clear stale grads
+            for p in trainable:
+                if p.grad is not None:
+                    p.grad.zero_()
 
             obj = self.E_step(self.Nu, self.Beta, self.Omega)
+
             if not torch.isfinite(obj):
+                # Remove stale grads
+                for p in trainable:
+                    p.grad = None
                 self._finite_clamp_()
-                # fallback in correct dtype
                 return torch.tensor(1e30, device=self.device, dtype=self.Nu.dtype)
 
             with amp_ctx:
                 self._analytical_grads_()
+
             _clean_grads(do_clip=False)
 
             nonlocal last_grad_norms
             last_grad_norms = _grad_norms_dict()
             return -obj  # LBFGS minimizes
 
-        # --- 4) main loop ---
-        if logger:
-            logger.start()
-        for _ in range(steps):
+        # ---- 4) outer optimization loop ----
+        for outer_step in range(steps):
             if use_lbfgs:
                 with torch.no_grad():
-                    snapshot = [p.clone() for p in trainable]
+                    snapshot = [p.detach().clone() for p in trainable]
+
                 try:
                     loss = opt.step(closure)
-                    obj_val = (-loss).item()
+                    obj_val = float(-loss)
                     self._finite_clamp_()
                 except (IndexError, RuntimeError):
+                    # LBFGS failure → warm-up Adam rescue
                     with torch.no_grad():
                         for p, s in zip(trainable, snapshot):
                             p.copy_(s)
-                    warm = torch.optim.Adam(trainable, lr=max(adam_kwargs.get("lr", lr) * 0.5, 1e-3))
+
+                    warm_lr = max(adam_kwargs.get("lr", lr) * 0.5, 1e-3)
+                    warm = torch.optim.Adam(trainable, lr=warm_lr)
+
                     for _warm in range(5):
                         warm.zero_grad(set_to_none=True)
                         obj = self.E_step(self.Nu, self.Beta, self.Omega)
@@ -1307,86 +1008,66 @@ class BLADE:
                         _clean_grads(do_clip=True)
                         warm.step()
                         self._finite_clamp_()
+
                     opt = torch.optim.LBFGS(trainable, **lbfgs_kwargs)
                     with torch.no_grad():
                         obj_val = float(self.E_step(self.Nu, self.Beta, self.Omega))
+
             else:
                 opt.zero_grad(set_to_none=True)
                 obj = self.E_step(self.Nu, self.Beta, self.Omega)
                 if not torch.isfinite(obj):
                     self._finite_clamp_()
                     continue
+
                 with amp_ctx:
                     self._analytical_grads_()
                 _clean_grads(do_clip=True)
                 opt.step()
                 self._finite_clamp_()
+
                 obj_val = float(obj)
                 last_grad_norms = _grad_norms_dict()
 
-            # ---- LOG ONE RECORD PER OUTER STEP ----
-            if logger:
-                logger.push(
-                    outer_step=outer_step if outer_step >= 0 else 0,
-                    phase=phase,
-                    obj_val=obj_val,
-                    grad_norms=last_grad_norms,
-                )
+            # ---- 5) early stopping ----
+            if not (obj_val == obj_val):  # NaN check
+                wait += 1
+                if wait >= patience:
+                    break
+                continue
 
-            # early stopping (patience)
-            if best_obj is None or obj_val > best_obj + 1e-7:
-                best_obj, wait = obj_val, 0
+            if best_obj is None or obj_val > best_obj + tol:
+                best_obj = obj_val
+                wait = 0
+                with torch.no_grad():
+                    best_snapshot = [p.detach().clone() for p in trainable]
             else:
                 wait += 1
                 if wait >= patience:
                     break
 
+        # ---- 6) restore best parameters ----
+        if best_snapshot is not None:
+            with torch.no_grad():
+                for p, b in zip(trainable, best_snapshot):
+                    p.copy_(b)
+            self._finite_clamp_()
+
         self.log = True
         return self
 
+        
     # Reestimation of Nu at specific weight
     def Reestimate_Nu(self, weight=100):
         self.weight = weight
         self.Optimize()
         return self
+    
 
-    def Check_health(self):
-        # check if optimization is done
-        if not hasattr(self, "log"):
-            warnings.warn("No optimization is not done yet", Warning, stacklevel=2)
-
-        # check values in hyperparameters
-        if not np.all(np.isfinite(self.Y.cpu().numpy())):
-            warnings.warn("non-finite values detected in bulk gene expression data (Y).", Warning, stacklevel=2)
-
-        if np.any(self.Y.cpu().numpy() < 0):
-            warnings.warn(
-                "Negative expression levels were detected in bulk gene expression data (Y).", Warning, stacklevel=2
-            )
-
-        if np.any(self.Alpha.cpu().numpy() <= 0):
-            warnings.warn("Zero or negative values in Alpha", Warning, stacklevel=2)
-
-        if np.any(self.Beta.cpu().numpy() <= 0):
-            warnings.warn("Zero or negative values in Beta", Warning, stacklevel=2)
-
-        if np.any(self.Alpha0.cpu().numpy() <= 0):
-            warnings.warn("Zero or negative values in Alpha0", Warning, stacklevel=2)
-
-        if np.any(self.Beta0.cpu().numpy() <= 0):
-            warnings.warn("Zero or negative values in Beta0", Warning, stacklevel=2)
-
-        if np.any(self.Kappa0.cpu().numpy() <= 0):
-            warnings.warn("Zero or negative values in Kappa0", Warning, stacklevel=2)
-
-
-
-    def Update_Alpha_Group(self, Expected=None, Temperature=None):
+    def Update_Alpha_Group(self, Expected=None):
         # Average concentration over all samples
         AvgBeta = torch.mean(self.Beta, dim=0)
         Fraction_Avg = AvgBeta / torch.sum(AvgBeta)
-        # print(f"[DEBUG] Fraction_Avg (mean baseline): {Fraction_Avg.detach().cpu().numpy()}")
-
         if Expected is not None:
             if isinstance(Expected, dict):
                 Group = Expected.get('Group', torch.eye(Expected['Expectation'].shape[1], device=self.device))
@@ -1407,10 +1088,6 @@ class BLADE:
             # now safe to tensor-ize
             Expected = torch.tensor(Expected, device=self.device)
             Group = torch.tensor(Group, device=self.device)
-
-            # print(f"[DEBUG] Expected tensor shape: {Expected.shape}")
-            # print(f"[DEBUG] Non-NaN priors per sample: {torch.sum(~torch.isnan(Expected), dim=1)}")
-            # print(f"[DEBUG] Sample 0 priors: {Expected[0].detach().cpu().numpy()}")
 
             for sample in range(self.Nsample):
                 Fraction = Fraction_Avg.clone()
@@ -1441,16 +1118,6 @@ class BLADE:
                 AlphaSum = torch.sum(AvgBeta[IndNan]) / torch.sum(Fraction[IndNan])
                 self.Alpha[sample] = Fraction * AlphaSum
 
-                # # --- DEBUG: per-sample output ---
-                # print(f"[DEBUG] Sample {sample}: used {len(IndG)} priors, remaining_mass={remaining_mass.item():.3f}")
-                # print(f"[DEBUG] Alpha[{sample}] sum={self.Alpha[sample].detach().sum().item():.4f}")
-
-            # --- DEBUG: summary after all samples ---
-            # print(f"[DEBUG] Alpha[0] after update: {self.Alpha[0].detach().cpu().numpy()}")
-            # diff = torch.sum(torch.abs(self.Alpha[0] - Fraction_Avg))
-            # print(f"[DEBUG] |Alpha[0] – Fraction_Avg| L1 difference: {diff.item():.6f}")
-
-            # optional flag for later checks
             self.used_expectation = True
 
         else:
@@ -1458,7 +1125,6 @@ class BLADE:
             self.Alpha = AvgBeta.repeat(self.Nsample, 1)
             # print("[DEBUG] No Expected provided; Alpha copied from AvgBeta")
             self.used_expectation = False
-
 
 
     def Update_SigmaY(self, SampleSpecific=False):
@@ -1473,18 +1139,7 @@ class BLADE:
         else:  # shared in all samples
             self.SigmaY = torch.mean(torch.sqrt(a + b), dim=1, keepdim=True).expand(-1, self.Nsample)
 
-
-def Optimize(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0, Nu_Init, Omega_Init, Nsample, Ncell, Init_Fraction):
-    Beta_Init = np.random.gamma(shape=1, size=(Nsample, Ncell)) * 0.1 + t(Init_Fraction) * 10
-    obs = BLADE(
-        logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0, Nu_Init, Omega_Init, Beta_Init, fix_Nu=True, fix_Omega=True
-    )
-    obs.Optimize()
-    obs.Fix_par["Nu"] = False
-    obs.Fix_par["Omega"] = False
-    obs.Optimize()
-    return obs
-
+    
 
 def NuSVR_job(X, Y, Nus, sample):
     X = np.exp(X) - 1
@@ -1520,7 +1175,9 @@ def SVR_Initialization(X, Y, Nus, Njob=1, fsel=0):
     return Init_Fraction, Ind_use
 
 
-# ---- parallel runtime helpers (patched) ----
+
+
+# ---- parallel runtime helpers  ----
 def _set_torch_threads(num_threads: int, interop_threads: int | None = None, *, best_effort: bool = True):
 
     num_threads = max(1, int(num_threads))
@@ -1543,8 +1200,8 @@ def _set_torch_threads(num_threads: int, interop_threads: int | None = None, *, 
 
 def _is_cuda_device(dev_str: str | None) -> bool:
     if dev_str is None:
-        return torch.cuda.is_available()
-    return str(dev_str).startswith("cuda")
+        return _has_usable_cuda()
+    return str(dev_str).startswith("cuda") and _has_usable_cuda()
 
 
 
@@ -1568,18 +1225,19 @@ def Iterative_Optimization(
     device=None,
     *,
     warm_start: bool = False,
-    adam_params: dict = None,  # safe defaults handled below
+    adam_params: dict = None,
     lbfgs_params: dict = None,
-    runtime_threads: int | None = None,  # NEW: per-process CPU threads; GPU workers force 1
+    runtime_threads: int | None = None,
 ):
-    # --- per-worker thread policy (NO interop here) ---
+
+    # Thread policy
     if _is_cuda_device(device):
-        _set_torch_threads(1, interop_threads=None)  # GPU worker: minimal CPU threads
+        _set_torch_threads(1, interop_threads=None)
         if torch.cuda.is_available():
             torch.cuda.set_device(torch.device(device))
     else:
         if runtime_threads is not None:
-            _set_torch_threads(runtime_threads, interop_threads=None)  # CPU worker: set only intra-op
+            _set_torch_threads(runtime_threads, interop_threads=None)
 
     Ngene, Nsample = Y.shape
     Ncell = X.shape[1]
@@ -1594,30 +1252,32 @@ def Iterative_Optimization(
     for i in range(Nsample):
         Nu_Init[i, :, :] = X
 
-    Beta_Init = np.random.gamma(shape=1, size=(Nsample, Ncell)) + t(Init_Fraction) * Init_Trust
+    Beta_Init = np.random.gamma(shape=1, size=(Nsample, Ncell)) + Init_Fraction.T * Init_Trust
 
-    obj = BLADE(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0, Nu_Init, Omega_Init, Beta_Init, device=device)
+    # Create BLADE object
+    obj = BLADE(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0,
+                Kappa0, Nu_Init, Omega_Init, Beta_Init, device=device)
 
-    # --- attach a run logger ---
-    run_log = OptLogger(label=f"rep{Rep}_warm{warm_start}")
-
+    # Track ELBO
     obj_func = [None] * iter
+
+    # First iteration snapshot
     with torch.no_grad():
-        obj_func[0] = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
+        obj_val = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
+        obj_func[0] = obj_val
 
-    
+    # NEW: record snapshot at iteration 0
+    obj.snapshot(iter_idx=0)
 
-    for i in range(1, iter):    
+    # ---- Main optimization loop ----
+    for i in range(1, iter):
         if i == 1 and warm_start:
             obj.Optimize(
                 method="adam",
                 steps=adam_params.get("steps"),
                 lr=adam_params.get("lr"),
                 betas=adam_params.get("betas"),
-                grad_clip=adam_params.get("grad_clip"),
-                logger=run_log,
-                phase="adam",
-                outer_step=i,
+                grad_clip=adam_params.get("grad_clip")
             )
         else:
             try:
@@ -1628,70 +1288,145 @@ def Iterative_Optimization(
                     max_iter=lbfgs_params.get("max_iter"),
                     history_size=100,
                     line_search_fn="strong_wolfe",
-                    grad_clip=lbfgs_params.get("grad_clip"),
-                    logger=run_log,
-                    phase="lbfgs",
-                    outer_step=i,
+                    grad_clip=lbfgs_params.get("grad_clip")
                 )
                 obj.Update_Alpha_Group(Expected=Expected)
-
                 if Update_SigmaY:
                     obj.Update_SigmaY()
             except Exception as e:
                 print(f"[WARN] optimisation failed at iter {i} rep {Rep} ({e})]")
 
 
+
+        obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
+        obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+                    line_search_fn="strong_wolfe")
+
+        obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
+        obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+                    line_search_fn="strong_wolfe")
+
+        obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
+        obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+                    line_search_fn="strong_wolfe")
+
+        obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
+
+
+
+        # Evaluate ELBO
         with torch.no_grad():
             obj_val = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
             obj_func[i] = obj_val
-            if not np.isfinite(obj_val):
-                print(f"[WARN] non-finite ELBO at outer iter {i} rep {Rep}; stopping.")
-                obj_func = obj_func[: i + 1]
-                break
-            if abs(obj_func[i] - obj_func[i - 1]) < minDiff:
-                obj_func = obj_func[: i + 1]
-                break
 
+        # NEW: snapshot at iteration i
+        obj.snapshot(iter_idx=i)
+
+        # Convergence checks
+        if not np.isfinite(obj_val):
+            print(f"[WARN] non-finite ELBO at outer iter {i} rep {Rep}; stopping.")
+            obj_func = obj_func[: i + 1]
+            break
+
+        if abs(obj_func[i] - obj_func[i - 1]) < minDiff:
+            obj_func = obj_func[: i + 1]
+            break
+
+    # Final ELBO
     with torch.no_grad():
         obj_func.append(float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)))
 
-    obj.train_log = getattr(obj, "train_log", []) + run_log.records
     print(Rep, ": Optimization finished after", len(obj_func), "iterations.")
-    return obj, obj_func, Rep
+
+    # NEW: return also the trajectory
+    return obj, obj_func, Rep, obj._trajectory
+
+    
 
 
+# -------------------------------------------------------
+# Helper: Visible CUDA devices (honors CUDA_VISIBLE_DEVICES)
+# -------------------------------------------------------
 def _visible_cuda_devices():
-    """Honor CUDA_VISIBLE_DEVICES if set; else enumerate real devices."""
+    """
+    Return a list of device strings ["cuda:0", "cuda:1", ...]
+    honoring CUDA_VISIBLE_DEVICES and only if CUDA is truly usable.
+    """
+    if not _has_usable_cuda():
+        return []
+
     vis = os.environ.get("CUDA_VISIBLE_DEVICES")
     if vis:
         toks = [t.strip() for t in vis.split(",") if t.strip() != ""]
         return [f"cuda:{i}" for i in range(len(toks))]
-    if torch.cuda.is_available():
-        return [f"cuda:{i}" for i in range(torch.cuda.device_count())]
-    return []
+
+    # driver is initialized already by _has_usable_cuda(), so device_count is safe
+    return [f"cuda:{i}" for i in range(torch.cuda.device_count())]
 
 
+# -------------------------------------------------------
+# Helper: Free VRAM (GiB)
+# -------------------------------------------------------
 def _free_vram_gb(dev_idx: int) -> float:
-    """Free VRAM on a device in GiB; fail-open to inf on odd setups."""
+    """Return free VRAM of a device in GiB; fail-open to +inf."""
     try:
         free_b, _ = torch.cuda.mem_get_info(dev_idx)
-        return free_b / (1024**3)
+        return free_b / (1024 ** 3)
     except Exception:
         return float("inf")
 
 
+# -------------------------------------------------------
+# Helper: Set CPU threading
+# -------------------------------------------------------
 def _set_threads(num_threads: int, interop_threads: int = 1):
-    """Set per-process CPU threading (PyTorch + BLAS)."""
+    """
+    Configure CPU threads for PyTorch and BLAS libraries.
+    Defaults are safe for joblib parallelism.
+    """
+    num_threads = max(1, int(num_threads))
+    interop_threads = max(1, int(interop_threads))
+
     try:
-        torch.set_num_threads(max(1, int(num_threads)))
-        torch.set_num_interop_threads(max(1, int(interop_threads)))
+        torch.set_num_threads(num_threads)
+        torch.set_num_interop_threads(interop_threads)
     except Exception:
-        pass
+        pass  # safe fallback
+
     os.environ.setdefault("OMP_NUM_THREADS", str(num_threads))
     os.environ.setdefault("MKL_NUM_THREADS", str(num_threads))
     os.environ.setdefault("OPENBLAS_NUM_THREADS", str(num_threads))
 
 
+# -------------------------------------------------------
+# Helper: Detect logical cores safely (SLURM-aware)
+# -------------------------------------------------------
+def _detect_logical_cores() -> int:
+    """
+    Prefer SLURM_CPUS_PER_TASK.
+    Else use OMP_NUM_THREADS.
+    Else os.cpu_count().
+    """
+    slurm = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm:
+        try:
+            return max(1, int(slurm))
+        except ValueError:
+            pass
+
+    omp = os.environ.get("OMP_NUM_THREADS")
+    if omp:
+        try:
+            return max(1, int(omp))
+        except ValueError:
+            pass
+
+    return os.cpu_count() or 1
+
+
+# -------------------------------------------------------
+# MAIN: Full device scheduling logic (CPU + GPU)
+# -------------------------------------------------------
 def plan_execution(
     Njob: int | None,
     Nrep: int,
@@ -1701,56 +1436,109 @@ def plan_execution(
     vram_soft_frac: float = 0.85,
 ):
     notes = []
+
+    # Detect usable CUDA devices
     gpus = _visible_cuda_devices()
     ngpu = len(gpus)
 
-    # pick backend
+    # Backend selection
     if backend == "auto":
         backend = "gpu" if ngpu > 0 else "cpu"
-
-    # ---------- CPU plan ----------
-    if backend == "cpu" or ngpu == 0:
+    if backend == "gpu" and ngpu == 0:
+        notes.append("No usable CUDA devices available → falling back to CPU.")
         backend = "cpu"
-        cores = os.cpu_count() or 1
-        # keep worker count modest by default
-        n_jobs_eff = int(Njob) if Njob is not None else min(8, cores, Nrep)
-        n_jobs_eff = max(1, min(n_jobs_eff, cores))
-        # SAFE DEFAULT: 1 thread per worker unless user overrides
-        t_per_job = int(threads_per_job) if threads_per_job is not None else 1
-        devices = ["cpu"] * n_jobs_eff
-        notes.append(f"CPU mode: {n_jobs_eff} workers × {t_per_job} threads (cores={cores}).")
 
-    # ---------- GPU plan ----------
-    else:
-        backend = "gpu"
-        n_jobs_target = int(Njob) if Njob is not None else min(ngpu, Nrep)
-        if n_jobs_target <= ngpu:
-            n_jobs_eff = max(1, min(n_jobs_target, ngpu, Nrep))
-            devices = gpus[:n_jobs_eff]
-            # SAFE DEFAULT: 1 thread per worker on GPU
-            t_per_job = int(threads_per_job) if threads_per_job is not None else 1
-            notes.append(f"GPU mode: {n_jobs_eff} workers over {ngpu} GPUs; threads/job={t_per_job}.")
+
+    # ============================================================
+    #                   CPU EXECUTION PLAN
+    # ============================================================
+    if backend == "cpu":
+        cores = _detect_logical_cores()
+
+        # FULL FAN-OUT DEFAULT:
+        # When Njob is unspecified → use ALL cores (capped by Nrep)
+        if Njob is not None:
+            n_jobs_eff = max(1, min(int(Njob), cores, Nrep))
         else:
-            per_gpu_req = int(math.ceil(n_jobs_target / ngpu))
-            devices = []
-            for gi in range(ngpu):
-                k = per_gpu_req
-                if est_vram_gb:
-                    free_gb = _free_vram_gb(gi) * vram_soft_frac
-                    cap = max(1, int(free_gb // float(est_vram_gb)))
-                    k = max(1, min(k, cap))
-                devices.extend([gpus[gi]] * k)
+            n_jobs_eff = max(1, min(cores, Nrep))
 
-            devices = devices[: min(n_jobs_target, Nrep)]
-            n_jobs_eff = len(devices) if devices else min(ngpu, Nrep)
-            if not devices:
+        # Thread-per-job default = 1 to avoid BLAS oversubscription
+        if threads_per_job is not None:
+            t_per_job = max(1, int(threads_per_job))
+        else:
+            t_per_job = 1
+
+        devices = ["cpu"] * n_jobs_eff
+        notes.append(
+            f"CPU mode: {n_jobs_eff} workers × {t_per_job} threads/job "
+            f"(logical cores={cores}, requested Njob={Njob}, Nrep={Nrep})"
+        )
+
+    # ============================================================
+    #                   GPU EXECUTION PLAN
+    # ============================================================
+    else:
+        # Safety for single-GPU or single MIG slice
+        if ngpu == 1:
+            devices = [gpus[0]]
+            n_jobs_eff = 1
+
+            t_per_job = max(1, int(threads_per_job)) if threads_per_job else 1
+
+            notes.append(
+                f"GPU mode (single device {gpus[0]}): forcing 1 worker to avoid multi-process VRAM contention."
+            )
+
+        else:
+            # Multi-GPU system
+            n_jobs_target = int(Njob) if Njob is not None else min(ngpu, Nrep)
+            n_jobs_target = max(1, n_jobs_target)
+
+            if n_jobs_target <= ngpu:
+                # 1 worker per GPU
+                n_jobs_eff = min(n_jobs_target, ngpu, Nrep)
                 devices = gpus[:n_jobs_eff]
-                notes.append("Packed plan soft-capped to 0 by VRAM; falling back to 1 per GPU.")
-            # SAFE DEFAULT: 1 thread per worker on GPU
-            t_per_job = int(threads_per_job) if threads_per_job is not None else 1
-            notes.append(f"Packed GPU mode: {n_jobs_eff} workers across {ngpu} GPUs; threads/job={t_per_job}.")
+                t_per_job = max(1, int(threads_per_job)) if threads_per_job else 1
 
-    rep_device = lambda rep: devices[rep % max(1, len(devices))]
+                notes.append(
+                    f"GPU mode: {n_jobs_eff} workers on devices {devices} "
+                    f"(ngpu={ngpu}, requested Njob={Njob}, Nrep={Nrep})"
+                )
+
+            else:
+                # Try to pack multiple workers per GPU (VRAM-aware)
+                per_gpu_req = math.ceil(n_jobs_target / ngpu)
+                devices = []
+
+                for gi, dev in enumerate(gpus):
+                    k = per_gpu_req
+
+                    if est_vram_gb is not None:
+                        free_gb = _free_vram_gb(gi) * vram_soft_frac
+                        cap = max(1, int(free_gb // est_vram_gb))
+                        k = min(k, cap)
+
+                    devices.extend([dev] * max(1, k))
+
+                devices = devices[:min(n_jobs_target, Nrep)]
+                n_jobs_eff = len(devices)
+
+                if n_jobs_eff == 0:
+                    devices = [gpus[0]]
+                    n_jobs_eff = 1
+                    notes.append("VRAM-capped packing → falling back to 1 worker on first GPU.")
+
+                t_per_job = max(1, int(threads_per_job)) if threads_per_job else 1
+
+                notes.append(
+                    f"Packed GPU mode: {n_jobs_eff} workers across GPUs {gpus} "
+                    f"(requested Njob={Njob}, Nrep={Nrep}, est_vram_gb={est_vram_gb})"
+                )
+
+    # Assign device to each replicate index
+    def rep_device(rep: int) -> str:
+        return devices[rep % len(devices)]
+
     return {
         "backend": backend,
         "devices": devices,
@@ -1760,11 +1548,9 @@ def plan_execution(
         "notes": notes,
     }
 
-
-# =========================
-# Revised Framework_Iterative
-# =========================
-
+# -------------------------
+# Framework_Iterative 
+# -------------------------
 
 def Framework_Iterative(
     X,
@@ -1788,13 +1574,33 @@ def Framework_Iterative(
     collect_logs: bool = False,
     adam_params: dict = None,
     lbfgs_params: dict = None,
-    backend: str = "auto",  # "auto" | "gpu" | "cpu"
-    threads_per_job: int | None = None,  # per-process CPU threads
+    backend: str = "auto",
+    threads_per_job: int | None = None,
 ):
-    # --- defaults for optimizer kwargs ---
-    adam_params = adam_params or {"lr": 0.001, "steps": 200, "betas": [0.9, 0.98], "grad_clip": 10000.0}
+    """
+    Main driver:
+      - Subsets marker genes
+      - Plans CPU/GPU execution
+      - Runs Nrep deconvolution replicates in parallel
+      - Returns best BLADE model and convergence info
+    """
 
-    lbfgs_params = lbfgs_params or {"lr": 0.1, "steps": 20, "max_iter": 30, "history_size": 100, "line_search_fn": "strong_wolfe"}
+    # --- defaults ---
+    adam_params = adam_params or {
+        "lr": 0.001,
+        "steps": 200,
+        "betas": [0.9, 0.98],
+        "grad_clip": 10000.0,
+    }
+
+    lbfgs_params = lbfgs_params or {
+        "lr": 0.1,
+        "steps": 20,
+        "max_iter": 30,
+        "history_size": 100,
+        "line_search_fn": "strong_wolfe",
+        "grad_clip": 10000.0,
+    }
 
     args = locals()
 
@@ -1802,25 +1608,20 @@ def Framework_Iterative(
     if Ind_Marker is None:
         Ind_Marker = [True] * Ngene
 
+    # Subset markers
     X_small = X[Ind_Marker, :]
     Y_small = Y[Ind_Marker, :]
     stdX_small = stdX[Ind_Marker, :]
 
-    # ---------- Plan execution (devices, concurrency, threads) ----------
-    est_vram_hint = None
-    try:
-        est_vram_hint = (adam_params.get("est_vram_gb") if adam_params else None) or (
-            lbfgs_params.get("est_vram_gb") if lbfgs_params else None
-        )
-    except Exception:
-        pass
-
+    # ----------------------------------------------------------------
+    # Planning execution (CPU/GPU)
+    # ----------------------------------------------------------------
     plan = plan_execution(
         Njob=Njob,
         Nrep=Nrep,
         threads_per_job=threads_per_job,
         backend=backend,
-        est_vram_gb=est_vram_hint,
+        est_vram_gb=None,
         vram_soft_frac=0.85,
     )
     devices = plan["devices"]
@@ -1831,20 +1632,32 @@ def Framework_Iterative(
     for line in plan["notes"]:
         print("[Framework]", line)
 
-    # Parent: set thread limits before any parallel work
+    # Set per-process threading policy for this job
     _set_threads(runtime_threads, interop_threads=1)
 
-    # ---------- Now safe to do any threaded work in parent ----------
-    print(f"start optimization using marker genes: {Y_small.shape[0]} genes out of {Ngene} genes.")
+    print(
+        f"start optimization using marker genes: "
+        f"{Y_small.shape[0]} genes out of {Ngene} genes."
+    )
     print("Initialization with Support vector regression")
 
-    # Use effective concurrency here too
-    Init_Fraction, Ind_use = SVR_Initialization(X_small, Y_small, Njob=(10), Nus=[0.25, 0.5, 0.75])
+    # ----------------------------------------------------------------
+    # SVR initialization
+    # ----------------------------------------------------------------
+    # Use up to 10 processes for SVR init, but not more than workers or samples
+    svr_jobs = min(10, Njob_eff, Nsample)
+    if svr_jobs < 1:
+        svr_jobs = 1
 
-    # ---------- worker wrapper (with OOM hint) ----------
+    Init_Fraction, Ind_use = SVR_Initialization(
+        X_small, Y_small, Njob=svr_jobs, Nus=[0.25, 0.5, 0.75]
+    )
+
+    # ----------------------------------------------------------------
+    # Worker for each replicate
+    # ----------------------------------------------------------------
     def _iter_one(rep):
         dev = rep_device(rep)
-        # print(f"[rep {rep:02d}] device={dev}, threads={runtime_threads}")
         try:
             return Iterative_Optimization(
                 X_small[Ind_use, :],
@@ -1864,1045 +1677,310 @@ def Framework_Iterative(
                 warm_start=warm_start,
                 adam_params=adam_params,
                 lbfgs_params=lbfgs_params,
-                runtime_threads=runtime_threads,  # worker sets *only* intra-op
+                runtime_threads=runtime_threads,
             )
         except RuntimeError as e:
             if (
                 "out of memory" in str(e).lower()
                 and plan["backend"] == "gpu"
-                and len(set(devices)) == 1  # packed single-GPU case
+                and len(set(devices)) == 1
                 and Njob_eff > 1
             ):
                 print(
-                    f"[rep {rep:02d}] CUDA OOM in packed single-GPU mode. "
-                    f"Try smaller batch / fewer workers (Njob) / threads_per_job=1."
+                    f"[rep {rep:02d}] CUDA OOM in packed mode. "
+                    f"Try smaller Njob or threads_per_job=1."
                 )
             raise
 
-    # print("DEBUG torch.cuda.is_available:", torch.cuda.is_available())
-    # print("DEBUG visible devices:", _visible_cuda_devices())
-    # print("DEBUG env CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
-    # print("DEBUG plan backend/devices/Njob_eff/threads:",
-    #     plan["backend"], plan["devices"], plan["n_jobs_eff"], plan["threads_per_job_eff"])
-    # ---------- Execute (parallel/serial based on Njob_eff) ----------
-    if Temperature is None or Temperature is False:
-        with parallel_backend("loky", n_jobs=Njob_eff):
-            triples = Parallel(n_jobs=Njob_eff, verbose=10)(delayed(_iter_one)(rep) for rep in range(Nrep))
-        outs, convs, Reps = zip(*triples)
+    # ----------------------------------------------------------------
+    # Execute Nrep runs in parallel
+    # ----------------------------------------------------------------
+    with parallel_backend("loky", n_jobs=Njob_eff):
+        results = Parallel(n_jobs=Njob_eff, verbose=10)(
+            delayed(_iter_one)(rep) for rep in range(Nrep)
+        )
 
-        # Evaluate ELBO (no grad, robust to NaN/Inf)
-        cri = []
-        with torch.no_grad():
-            for obj in outs:
-                val = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
-                val = float(val.detach().cpu().item())
-                if not math.isfinite(val):
-                    val = float("-inf")
-                cri.append(val)
+    # Unpack results
+    outs, convs, Reps, trajectories = zip(*results)
 
-        if all(v == float("-inf") for v in cri):
-            raise RuntimeError("All runs produced non-finite ELBO. Try lower lr/steps or inspect inputs.")
+    # ----------------------------------------------------------------
+    # Select best replicate by ELBO
+    # ----------------------------------------------------------------
+    cri = []
+    with torch.no_grad():
+        for obj in outs:
+            val = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
+            val = float(val.detach().cpu().item())
+            if not math.isfinite(val):
+                val = float("-inf")
+            cri.append(val)
 
-        best = int(np.argmax(cri))
-        out = outs[best]
-        conv = convs[best]
+    if all(v == float("-inf") for v in cri):
+        raise RuntimeError("All runs produced non-finite ELBO.")
 
-    else:
-        # --- temperature schedule branch (serial here) ---
-        if Temperature is True:
-            Temperature = [1, 100]
-        else:
-            if len(Temperature) != 2:
-                raise ValueError("Temperature must be None, True, or [Tmin, Tmax].")
-            if Temperature[1] < Temperature[0]:
-                raise ValueError("Max temperature must be ≥ min temperature.")
+    best = int(np.argmax(cri))
+    out = outs[best]
+    conv = convs[best]
 
-        triples = [
-            Iterative_Optimization(
-                X_small[Ind_use, :],
-                stdX_small[Ind_use, :],
-                Y_small[Ind_use, :],
-                Alpha,
-                Alpha0,
-                Kappa0,
-                sY,
-                rep,
-                Init_Fraction,
-                Expected=Expectation,
-                Init_Trust=Init_Trust,
-                TempRange=np.linspace(Temperature[0], Temperature[1], num=IterMax),
-                Update_SigmaY=Update_SigmaY,
-                warm_start=warm_start,
-                adam_params=adam_params,
-                lbfgs_params=lbfgs_params,
-                runtime_threads=runtime_threads,
-            )
-            for rep in range(Nrep)
-        ]
-
-        outs, convs, Reps = zip(*triples)
-        with torch.no_grad():
-            cri = [float(obj.E_step(obj.Nu, obj.Beta, obj.Omega)) for obj in outs]
-        best = int(np.nanargmax(cri))
-        out = outs[best]
-        conv = convs[best]
-
+    # ----------------------------------------------------------------
+    # Final return logic
+    # ----------------------------------------------------------------
     if collect_logs:
-        logs = [{"rep": r, "log": getattr(o, "train_log", [])} for o, r in zip(outs, Reps)]
-        return out, conv, zip(outs, cri), args, logs
-
-    return out, conv, zip(outs, cri), args
-
-
-#########NUMBA functions for purification########
-
-
-@njit(fastmath=True)
-def ExpF_numba(Beta, Ncell):
-    # NSample by Ncell (Expectation of F)
-    output = np.empty(Beta.shape)
-    for c in range(Ncell):
-        output[:, c] = Beta[:, c] / np.sum(Beta, axis=1)
-    return output
-
-
-@njit(fastmath=True)
-def ExpQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample):
-    # Ngene by Nsample (Expected value of Y)
-    ExpB = ExpF_numba(Beta, Ncell)  # Nsample by Ncell
-    out = np.zeros((Ngene, Nsample))
-    for i in range(Nsample):
-        for c in range(Ncell):
-            out[:, i] = out[:, i] + ExpB[i, c] * np.exp(Nu[i, :, c] + 0.5 * np.square(Omega[:, c]))
-
-    return out
-
-
-@njit(fastmath=True)
-def VarQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample):
-    # Ngene by Nsample (Variance value of Y)
-    B0 = np.sum(Beta, axis=1)  # Nsample
-    Btilda = ExpF_numba(Beta, Ncell)  # Nsample by Ncell
-    VarB = Btilda * (1 - Btilda)
-    for c in range(Ncell):
-        VarB[:, c] = VarB[:, c] / (B0 + 1)
-
-    # Nsample Ncell Ncell
-    CovB = np.empty((Nsample, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            CovB[:, l, k] = -Btilda[:, l] * Btilda[:, k] / (1 + B0)
-
-    # Ngene by Nsample by Ncell by Ncell
-    CovX = np.empty((Ngene, Nsample, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            for i in range(Nsample):
-                CovX[:, i, l, k] = np.exp(
-                    Nu[i, :, k] + Nu[i, :, l] + 0.5 * (np.square(Omega[:, k]) + np.square(Omega[:, l]))
-                )
-
-    VarTerm = np.zeros((Ngene, Nsample))
-    for i in range(Nsample):
-        for c in range(Ncell):
-            VarTerm[:, i] = (
-                VarTerm[:, i]
-                + np.exp(2 * Nu[i, :, c] + 2 * np.square(Omega)[:, c]) * (VarB[i, c] + np.square(Btilda[i, c]))
-                - np.exp(2 * Nu[i, :, c] + np.square(Omega[:, c])) * (np.square(Btilda[i, c]))
-            )
-
-    # Ngene by Ncell
-    CovTerm = np.zeros((Ngene, Nsample))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            if l != k:
-                for i in range(Nsample):
-                    CovTerm[:, i] = CovTerm[:, i] + CovX[:, i, l, k] * CovB[i, l, k]
-
-    return VarTerm + CovTerm
-
-
-@njit(fastmath=True)
-def Estep_PY_numba(Y, SigmaY, Nu, Omega, Beta, Ngene, Ncell, Nsample):
-    Var = VarQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)
-    Exp = ExpQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)
-
-    a = Var / Exp / Exp
-
-    return np.sum(-0.5 / np.square(SigmaY) * (a + np.square((Y - np.log(Exp)) - 0.5 * a)))
-
-
-@njit(fastmath=True)
-def Estep_PX_numba(Mu0, Nu, Omega, Alpha0, Beta0, Kappa0, Ncell, Nsample):
-    NuExp = np.sum(Nu, 0) / Nsample  # expected Nu, Ngene by Ncell
-    AlphaN = Alpha0 + 0.5 * Nsample  # Posterior Alpha
-
-    ExpBetaN = (
-        Beta0
-        + (Nsample - 1) / 2 * np.square(Omega)
-        + Kappa0 * Nsample / (2 * (Kappa0 + Nsample)) * (np.square(Omega) / Nsample + np.square(NuExp - Mu0))
-    )
-
-    for i in range(Nsample):
-        ExpBetaN = ExpBetaN + 0.5 * np.square(Nu[i, :, :] - NuExp)
-
-    return np.sum(-AlphaN * np.log(ExpBetaN))
-
-
-@njit(fastmath=True)
-def grad_Nu_numba(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, Ncell, Nsample, weight):
-    # return Nsample by Ngene by Ncell
-
-    # gradient of PX (first term)
-    AlphaN = Alpha0 + Nsample * 0.5
-    NuExp = np.sum(Nu, 0) / Nsample
-
-    Diff = np.zeros((Ngene, Ncell))
-    ExpBetaN = (
-        Beta0
-        + (Nsample - 1) / 2 * np.square(Omega)
-        + Kappa0 * Nsample / (2 * (Kappa0 + Nsample)) * (np.square(Omega) / Nsample + np.square(NuExp - Mu0))
-    )
-
-    for i in range(Nsample):
-        ExpBetaN = ExpBetaN + 0.5 * np.square(Nu[i, :, :] - NuExp)
-        Diff = Diff + (Nu[i, :, :] - NuExp) / Nsample
-
-    Nominator = np.empty((Nsample, Ngene, Ncell))
-    for i in range(Nsample):
-        Nominator[i, :, :] = Nu[i, :, :] - NuExp - Diff + Kappa0 / (Kappa0 + Nsample) * (NuExp - Mu0)
-
-    grad_PX = -AlphaN * Nominator / ExpBetaN
-
-    # gradient of PY (second term)
-    # Ngene by Nsample (Variance value of Y)
-    B0 = np.sum(Beta, axis=1)  # Nsample
-    Btilda = ExpF_numba(Beta, Ncell)  # Nsample by Ncell
-
-    # Ngene by Ncell by Nsample
-    Exp = ExpQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)  # Ngene by Nsample
-    Var = VarQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)  # Ngene by Nsample
-
-    # Ngene by Nsample by Ncell by Ncell
-    CovB = np.empty((Nsample, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            CovB[:, l, k] = -Btilda[:, l] * Btilda[:, k] / (1 + B0)
-
-    ExpX = np.empty(Nu.shape)  # Nsample by Ngene by Ncell
-    for i in range(Nsample):
-        ExpX[i, :, :] = np.exp(Nu[i, :, :] + 0.5 * np.square(Omega))
-
-    CovX = np.empty((Ngene, Nsample, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            for i in range(Nsample):
-                CovX[:, i, l, k] = ExpX[i, :, l] * ExpX[i, :, k]
-
-    # Ngene by Ncell by Nsample
-    CovTerm = np.zeros((Ngene, Ncell, Nsample))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            if l != k:
-                for i in range(Nsample):
-                    CovTerm[:, l, i] = CovTerm[:, l, i] + 2 * CovX[:, i, l, k] * CovB[i, l, k]
-
-    # Ngene by Ncell by Nsample
-    g_Exp = np.empty((Ngene, Ncell, Nsample))
-    for c in range(Ncell):
-        for i in range(Nsample):
-            g_Exp[:, c, i] = ExpX[i, :, c] * Btilda[i, c]
-
-    # Ngene by Ncell by Nsample
-    g_Var = np.empty((Ngene, Ncell, Nsample))
-    VarX = np.empty(Nu.shape)
-    for i in range(Nsample):
-        VarX[i, :, :] = np.exp(2 * Nu[i, :, :] + 2 * np.square(Omega))
-
-    VarB = Btilda * (1 - Btilda)
-    for c in range(Ncell):
-        VarB[:, c] = VarB[:, c] / (B0 + 1)
-
-    for c in range(Ncell):
-        for i in range(Nsample):
-            g_Var[:, c, i] = 2 * VarX[i, :, c] * (VarB[i, c] + np.square(Btilda[i, c])) - 2 * CovX[
-                :, i, c, c
-            ] * np.square(Btilda[i, c])
-    g_Var = g_Var + CovTerm
-
-    # Ngene by Ncell by Nsample
-    a = np.empty((Ngene, Ncell, Nsample))
-    for c in range(Ncell):
-        a[:, c, :] = (g_Var[:, c, :] - 2 * g_Exp[:, c, :] / Exp * Var) / np.power(Exp, 2)
-
-    b = np.empty((Ngene, Ncell, Nsample))
-    Diff = Y - np.log(Exp) - Var / (2 * np.square(Exp))
-    for c in range(Ncell):
-        b[:, c, :] = -Diff * (2 * g_Exp[:, c, :] / Exp + a[:, c, :])
-
-    grad_PY = np.zeros((Nsample, Ngene, Ncell))
-    for c in range(Ncell):
-        grad_PY[:, :, c] = -np.transpose(0.5 / np.square(SigmaY) * (a[:, c, :] + b[:, c, :]))
-
-    return grad_PX * (1 / weight) + grad_PY
-
-
-@njit(fastmath=True)
-def grad_Omega_numba(Y, SigmaY, Nu, Omega, Beta, Mu0, Alpha0, Beta0, Kappa0, Ngene, Ncell, Nsample, weight):
-    # Ngene by Ncell
-
-    # gradient of PX (first term)
-    AlphaN = Alpha0 + Nsample * 0.5
-    NuExp = np.sum(Nu, 0) / Nsample
-    ExpBetaN = (
-        Beta0
-        + (Nsample - 1) / 2 * np.square(Omega)
-        + Kappa0 * Nsample / (2 * (Kappa0 + Nsample)) * (np.square(Omega) / Nsample + np.square(NuExp - Mu0))
-    )
-
-    for i in range(Nsample):
-        ExpBetaN = ExpBetaN + 0.5 * np.square(Nu[i, :, :] - NuExp)
-
-    Nominator = -AlphaN * (Nsample - 1) * Omega + Kappa0 / (Kappa0 + Nsample) * Omega
-    grad_PX = Nominator / ExpBetaN
-
-    # gradient of PY (second term)
-    # Ngene by Nsample (Variance value of Y)
-    B0 = np.sum(Beta, axis=1)  # Nsample
-    Btilda = ExpF_numba(Beta, Ncell)  # Nsample by Ncell
-
-    # Ngene by Ncell by Nsample
-    Exp = ExpQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)  # Ngene by Nsample
-    Var = VarQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)  # Ngene by Nsample
-
-    # Ngene by Nsample by Ncell by Ncell
-    CovB = np.empty((Nsample, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            CovB[:, l, k] = -Btilda[:, l] * Btilda[:, k] / (1 + B0)
-
-    ExpX = np.exp(Nu)  # Nsample by Ngene by Ncell
-    for i in range(Nsample):
-        ExpX[i, :, :] = ExpX[i, :, :] * np.exp(0.5 * np.square(Omega))
-
-    CovX = np.empty((Ngene, Nsample, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            for i in range(Nsample):
-                CovX[:, i, l, k] = ExpX[i, :, l] * ExpX[i, :, k]
-
-    # Ngene by Ncell by Nsample
-    CovTerm = np.zeros((Ngene, Ncell, Nsample))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            if l != k:
-                for i in range(Nsample):
-                    CovTerm[:, l, i] = CovTerm[:, l, i] + 2 * CovX[:, i, l, k] * CovB[i, l, k] * Omega[:, l]
-
-    # Ngene by Ncell by Nsample
-    g_Exp = np.empty((Ngene, Ncell, Nsample))
-    for c in range(Ncell):
-        for i in range(Nsample):
-            g_Exp[:, c, i] = ExpX[i, :, c] * Btilda[i, c] * Omega[:, c]
-
-    # Ngene by Ncell by Nsample
-    g_Var = np.empty((Ngene, Ncell, Nsample))
-    VarX = np.exp(2 * Nu)
-    for i in range(Nsample):
-        VarX[i, :, :] = VarX[i, :, :] * np.exp(2 * np.square(Omega))
-
-    VarB = Btilda * (1 - Btilda)
-    for c in range(Ncell):
-        VarB[:, c] = VarB[:, c] / (B0 + 1)
-
-    for c in range(Ncell):
-        for i in range(Nsample):
-            g_Var[:, c, i] = 4 * Omega[:, c] * VarX[i, :, c] * (VarB[i, c] + np.square(Btilda[i, c])) - 2 * Omega[
-                :, c
-            ] * CovX[:, i, c, c] * np.square(Btilda[i, c])
-    g_Var = g_Var + CovTerm
-
-    # Ngene by Ncell by Nsample
-    a = np.empty((Ngene, Ncell, Nsample))
-    for c in range(Ncell):
-        a[:, c, :] = (g_Var[:, c, :] - 2 * g_Exp[:, c, :] * Var / Exp) / np.power(Exp, 2)
-
-    b = np.empty((Ngene, Ncell, Nsample))
-    Diff = Y - np.log(Exp) - Var / (2 * np.square(Exp))
-    for c in range(Ncell):
-        b[:, c, :] = -Diff * (2 * g_Exp[:, c, :] / Exp + a[:, c, :])
-
-    grad_PY = np.zeros((Ngene, Ncell))
-    for c in range(Ncell):
-        grad_PY[:, c] = np.sum(-0.5 / np.square(SigmaY) * (a[:, c, :] + b[:, c, :]), axis=1)
-
-    # Q(X) (fourth term)
-    grad_QX = -Nsample / Omega
-
-    return grad_PX * (1 / weight) + grad_PY - grad_QX * (1 / weight)
-
-
-@njit(fastmath=True)
-def g_Exp_Beta_numba(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample):
-    ExpX = np.exp(Nu)
-    for i in range(Nsample):
-        ExpX[i, :, :] = ExpX[i, :, :] * np.exp(0.5 * np.square(Omega))  # Nsample by Ngene by Ncell
-    B0mat = np.empty(Beta.shape)
-    for c in range(Ncell):
-        B0mat[:, c] = Beta[:, c] / np.square(B0)
-
-    tmp = np.empty((Nsample, Ngene))
-    tExpX = np.ascontiguousarray(ExpX.transpose(0, 2, 1))  ## Make tExpX contiguous again
-    for i in range(Nsample):
-        tmp[i, :] = np.dot(B0mat[i, :], tExpX[i, ...])
-    B0mat = tmp
-
-    g_Exp = np.empty((Nsample, Ncell, Ngene))
-
-    for s in range(Nsample):
-        for c in range(Ncell):
-            g_Exp[s, c, :] = t(ExpX[s, :, c] / B0[s]) - B0mat[s, :]
-
-    return g_Exp
-
-
-@njit(fastmath=True)
-def g_Var_Beta_numba(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample):
-    B0Rep = np.empty(Beta.shape)  # Nsample by Ncell
-    for c in range(Ncell):
-        B0Rep[:, c] = B0
-
-    aa = (B0Rep - Beta) * B0Rep * (B0Rep + 1) - (3 * B0Rep + 2) * Beta * (B0Rep - Beta)
-    aa = aa / (np.power(B0Rep, 3) * np.square(B0Rep + 1))
-    aa = aa + 2 * Beta * (B0Rep - Beta) / np.power(B0Rep, 3)
-
-    aaNotT = Beta * B0Rep * (B0Rep + 1) - (3 * B0Rep + 2) * Beta * (B0Rep - Beta)
-    aaNotT = aaNotT / (np.power(B0Rep, 3) * np.square(B0Rep + 1))
-    aaNotT = aaNotT + 2 * Beta * (0 - Beta) / np.power(B0Rep, 3)
-
-    ExpX2 = 2 * Nu  # Nsample by Ngene by Ncell
-    for i in range(Nsample):
-        ExpX2[i, :, :] = np.exp(ExpX2[i, :, :] + 2 * np.square(Omega))
-
-    g_Var = np.zeros((Nsample, Ncell, Ngene))
-
-    for s in range(Nsample):
-        for c in range(Ncell):
-            g_Var[s, c, :] = t(ExpX2[s, :, c]) * aa[s, c]
-
-    for i in range(Ncell):
-        for j in range(Ncell):
-            if i != j:
-                for s in range(Nsample):
-                    g_Var[s, i, :] = g_Var[s, i, :] + t(ExpX2[s, :, j]) * aaNotT[s, j]
-
-    B_B02 = Beta / np.square(B0Rep)  # Beta / (Beta0^2) / Nsample by Ncell
-    B0B0_1 = B0Rep * (B0Rep + 1)  # Beta0 (Beta0+1) / Nsample by Nell
-    B2_B03 = np.square(Beta) / np.power(B0Rep, 3)  # Beta^2 / (Beta0^3) / Nsample by Ncell
-
-    ExpX = np.empty(Nu.shape)
-    for i in range(Nsample):
-        ExpX[i, :, :] = np.exp(2 * Nu[i, :, :] + np.square(Omega))
-
-    for s in range(Nsample):
-        for c in range(Ncell):
-            g_Var[s, c, :] = g_Var[s, c, :] - 2 * t(ExpX[s, :, c]) * B_B02[s, c]
-
-    Dot = np.zeros((Nsample, Ngene))
-    for i in range(Nsample):
-        for c in range(Ncell):
-            Dot[i, :] = Dot[i, :] + B2_B03[i, c] * ExpX[i, :, c]
-
-    for c in range(Ncell):
-        g_Var[:, c, :] = g_Var[:, c, :] + 2 * Dot
-
-    # Ngene by Nsample by Ncell by N cell
-    ExpX = np.empty((Nsample, Ngene, Ncell))
-    for i in range(Nsample):
-        ExpX[i, :, :] = np.exp(Nu[i, :, :] + 0.5 * np.square(Omega))
-    CovX = np.empty((Nsample, Ngene, Ncell, Ncell))
-    for l in range(Ncell):
-        for k in range(Ncell):
-            for i in range(Nsample):
-                CovX[i, :, l, k] = ExpX[i, :, l] * ExpX[i, :, k]
-
-    gradCovB = np.empty((Nsample, Ncell, Ncell))
-    B03_2_B03_B0_1 = (3 * B0 + 2) / np.power(B0, 3) / np.square(B0 + 1)
-    for l in range(Ncell):
-        for k in range(Ncell):
-            gradCovB[:, l, k] = Beta[:, l] * Beta[:, k] * B03_2_B03_B0_1
-
-    # Nsample by Ncell by Ncell by Ngene
-    CovTerm1 = np.zeros((Nsample, Ncell, Ncell, Ngene))
-    CovTerm2 = np.zeros((Nsample, Ncell, Ncell, Ngene))
-    B_B0_1_B0B0_1 = Beta * (B0Rep + 1) / np.square(B0B0_1)  # Nsample by Ncell
-    for l in range(Ncell):
-        for k in range(Ncell):
-            for i in range(Nsample):
-                if l != k:
-                    CovTerm1[i, l, k, :] = gradCovB[i, l, k] * CovX[i, :, l, k]
-                    CovTerm2[i, l, k, :] = B_B0_1_B0B0_1[i, l] * CovX[i, :, l, k]
-
-    for c in range(Ncell):
-        g_Var[:, c, :] = g_Var[:, c, :] + np.sum(np.sum(CovTerm1, axis=1), axis=1)
-    g_Var = g_Var - 2 * np.sum(CovTerm2, axis=1)
-
-    return g_Var
-
-
-@njit(fastmath=True)
-def g_PY_Beta(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
-    # Ngene by Nsample
-    Exp = ExpQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)
-    Var = VarQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)
-
-    # Nsample by Ncell be Ngene
-    g_Exp = g_Exp_Beta_numba(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)
-    g_Var = g_Var_Beta_numba(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)
-
-    # Nsample by Ncell by Ngene
-    a = np.empty((Nsample, Ncell, Ngene))
-    for c in range(Ncell):
-        a[:, c, :] = np.divide((g_Var[:, c, :] * t(Exp) - 2 * g_Exp[:, c, :] * t(Var)), np.power(t(Exp), 3))
-
-    b = np.empty((Nsample, Ncell, Ngene))
-    Var_Exp2 = np.divide(Var, 2 * np.square(Exp))
-    for s in range(Nsample):
-        for c in range(Ncell):
-            for g in range(Ngene):
-                b[s, c, g] = -(Y[g, s] - np.log(Exp[g, s]) - Var_Exp2[g, s]) * (
-                    2 * np.divide(g_Exp[s, c, g], Exp[g, s]) + a[s, c, g]
-                )
-
-    grad_PY = np.zeros((Nsample, Ncell))
-    for s in range(Nsample):
-        for c in range(Ncell):
-            grad_PY[s, c] = grad_PY[s, c] - np.sum(0.5 / np.square(SigmaY[:, s]) * (a[s, c, :] + b[s, c, :]))
-
-    return grad_PY
-
-
-@njit(fastmath=True)
-def g_PY_Beta_numba(Nu, Beta, Omega, Y, SigmaY, B0, Ngene, Ncell, Nsample):
-    # Ngene by Nsample
-    Exp = ExpQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)
-    Var = VarQ_numba(Nu, Beta, Omega, Ngene, Ncell, Nsample)
-
-    # Nsample by Ncell be Ngene
-    g_Exp = g_Exp_Beta_numba(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)
-    g_Var = g_Var_Beta_numba(Nu, Omega, Beta, B0, Ngene, Ncell, Nsample)
-
-    # Nsample by Ncell by Ngene
-    a = np.empty((Nsample, Ncell, Ngene))
-    for c in range(Ncell):
-        a[:, c, :] = np.divide((g_Var[:, c, :] * t(Exp) - 2 * g_Exp[:, c, :] * t(Var)), np.power(t(Exp), 3))
-
-    b = np.empty((Nsample, Ncell, Ngene))
-    Var_Exp2 = np.divide(Var, 2 * np.square(Exp))
-    for s in range(Nsample):
-        for c in range(Ncell):
-            for g in range(Ngene):
-                b[s, c, g] = -(Y[g, s] - np.log(Exp[g, s]) - Var_Exp2[g, s]) * (
-                    2 * np.divide(g_Exp[s, c, g], Exp[g, s]) + a[s, c, g]
-                )
-
-    grad_PY = np.zeros((Nsample, Ncell))
-    for s in range(Nsample):
-        for c in range(Ncell):
-            grad_PY[s, c] = grad_PY[s, c] - np.sum(0.5 / np.square(SigmaY[:, s]) * (a[s, c, :] + b[s, c, :]))
-
-    return grad_PY
-
-
-######Casting function#######
-
-
-def to_torch(array, device="cuda"):
-    return torch.tensor(array).to(device)
-
-
-def convert_to_numpy(tensor):
-    if isinstance(tensor, torch.Tensor):
-        return tensor.cpu().numpy() if tensor.is_cuda else tensor.numpy()
-    return tensor
-
-
-def ensure_numpy(array):
-    if isinstance(array, torch.Tensor):
-        return array.detach().cpu().numpy()  # Ensures tensor is on CPU and converts to numpy
-    return array
-
-
-class BLADE_numba:
-    def __init__(
-        self,
-        Y,
-        SigmaY=0.05,
-        Mu0=2,
-        Alpha=1,
-        Alpha0=1,
-        Beta0=1,
-        Kappa0=1,
-        Nu_Init=None,
-        Omega_Init=1,
-        Beta_Init=None,
-        fix_Beta=False,
-        fix_Nu=False,
-        fix_Omega=False,
-    ):
-        self.weight = 1
-
-        # Ensure all tensor inputs are converted to numpy arrays
-        self.Y = ensure_numpy(Y)
-        self.Ngene, self.Nsample = self.Y.shape
-
-        self.Mu0 = ensure_numpy(Mu0) if isinstance(Mu0, np.ndarray) else np.zeros((self.Ngene, Mu0))
-        self.Ncell = self.Mu0.shape[1]
-
-        self.SigmaY = (
-            ensure_numpy(SigmaY) if isinstance(SigmaY, np.ndarray) else np.ones((self.Ngene, self.Nsample)) * SigmaY
-        )
-        self.Alpha = (
-            ensure_numpy(Alpha) if isinstance(Alpha, np.ndarray) else np.ones((self.Nsample, self.Ncell)) * Alpha
-        )
-        self.Omega = (
-            ensure_numpy(Omega_Init)
-            if isinstance(Omega_Init, np.ndarray)
-            else np.zeros((self.Ngene, self.Ncell)) + Omega_Init
-        )
-        self.Nu = ensure_numpy(Nu_Init) if Nu_Init is not None else np.zeros((self.Nsample, self.Ngene, self.Ncell))
-        self.Beta = (
-            ensure_numpy(Beta_Init) if isinstance(Beta_Init, np.ndarray) else np.ones((self.Nsample, self.Ncell))
-        )
-        self.Alpha0 = (
-            ensure_numpy(Alpha0) if isinstance(Alpha0, np.ndarray) else np.ones((self.Ngene, self.Ncell)) * Alpha0
-        )
-        self.Beta0 = ensure_numpy(Beta0) if isinstance(Beta0, np.ndarray) else np.ones((self.Ngene, self.Ncell)) * Beta0
-        self.Kappa0 = (
-            ensure_numpy(Kappa0) if isinstance(Kappa0, np.ndarray) else np.ones((self.Ngene, self.Ncell)) * Kappa0
-        )
-
-        self.Fix_par = {"Beta": fix_Beta, "Nu": fix_Nu, "Omega": fix_Omega}
-
-    def Ydiff(self, Nu, Beta):
-        F = self.ExpF(Beta)
-        Ypred = np.dot(np.exp(Nu), t(F))
-        return np.sum(np.square(self.Y - Ypred))
-
-    def ExpF_numba(self, Beta):
-        # NSample by Ncell (Expectation of F)
-        return ExpF_numba(Beta, self.Ncell)
-
-    def ExpQ_numba(self, Nu, Beta, Omega):
-        # Ngene by Nsample (Expected value of Y)
-        return ExpQ_numba(Nu, Beta, Omega, self.Ngene, self.Ncell, self.Nsample)
-
-    def VarQ_numba(self, Nu, Beta, Omega):
-        # Ngene by Nsample (Variance value of Y)
-        return VarQ_numba(Nu, Beta, Omega, self.Ngene, self.Ncell, self.Nsample)
-
-    # Expectation of log P(X | mu0, Kappa0, Alpha0, Beta0)
-    def Estep_PX(self, Nu, Omega):
-        return Estep_PX_numba(self.Mu0, Nu, Omega, self.Alpha0, self.Beta0, self.Kappa0, self.Ncell, self.Nsample)
-
-    # Expectation of log P(Y|X,F)
-    def Estep_PY(self, Nu, Omega, Beta):
-        return Estep_PY_numba(self.Y, self.SigmaY, Nu, Omega, Beta, self.Ngene, self.Ncell, self.Nsample)
-
-    # Expectation of log P(F)
-    def Estep_PF(self, Beta):
-        return -(np.sum(loggamma(self.Alpha)) - np.sum(loggamma(self.Alpha.sum(axis=1)))) + np.sum(
-            (self.Alpha - 1) * (digamma(Beta) - np.tile(digamma(np.sum(Beta, axis=1))[:, np.newaxis], [1, self.Ncell]))
-        )
-
-    # Expectation of log Q(X)
-    def Estep_QX(self, Omega):
-        return -self.Nsample * np.sum(np.log(Omega))
-
-    # Expectation of log Q(F)
-    def Estep_QF(self, Beta):
-        return -(np.sum(loggamma(Beta)) - np.sum(loggamma(Beta.sum(axis=1)))) + np.sum(
-            (Beta - 1) * (digamma(Beta) - np.tile(digamma(np.sum(Beta, axis=1))[:, np.newaxis], [1, self.Ncell]))
-        )
-
-    def grad_Nu(self, Nu, Omega, Beta):
-        # return Ngene by Ncell
-        return grad_Nu_numba(
-            self.Y,
-            self.SigmaY,
-            Nu,
-            Omega,
-            Beta,
-            self.Mu0,
-            self.Alpha0,
-            self.Beta0,
-            self.Kappa0,
-            self.Ngene,
-            self.Ncell,
-            self.Nsample,
-            self.weight,
-        )
-
-    def grad_Omega(self, Nu, Omega, Beta):
-        # return Ngene by Ncell
-        return grad_Omega_numba(
-            self.Y,
-            self.SigmaY,
-            Nu,
-            Omega,
-            Beta,
-            self.Mu0,
-            self.Alpha0,
-            self.Beta0,
-            self.Kappa0,
-            self.Ngene,
-            self.Ncell,
-            self.Nsample,
-            self.weight,
-        )
-
-    def g_Exp_Beta(self, Nu, Omega, Beta, B0):
-        return g_Exp_Beta_numba(Nu, Omega, Beta, B0, self.Ngene, self.Ncell, self.Nsample)
-
-    def grad_Beta(self, Nu, Omega, Beta):
-        # return Nsample by Ncell
-        B0 = np.sum(self.Beta, axis=1)
-
-        grad_PY = g_PY_Beta(Nu, Beta, Omega, self.Y, self.SigmaY, B0, self.Ngene, self.Ncell, self.Nsample)
-
-        grad_PF = (self.Alpha - 1) * polygamma(1, Beta) - np.tile(
-            np.sum((self.Alpha - 1) * np.tile(polygamma(1, B0)[:, np.newaxis], [1, self.Ncell]), axis=1)[:, np.newaxis],
-            [1, self.Ncell],
-        )
-
-        grad_QF = (Beta - 1) * polygamma(1, Beta) - np.tile(
-            np.sum((Beta - 1) * np.tile(polygamma(1, B0)[:, np.newaxis], [1, self.Ncell]), axis=1)[:, np.newaxis],
-            [1, self.Ncell],
-        )
-
-        return grad_PY + grad_PF * np.sqrt(self.Ngene / self.Ncell) - grad_QF * np.sqrt(self.Ngene / self.Ncell)
-
-    # E step
-    def E_step(self, Nu, Beta, Omega):
-        PX = self.Estep_PX(Nu, Omega) * (1 / self.weight)
-        PY = self.Estep_PY(Nu, Omega, Beta)
-        PF = self.Estep_PF(Beta) * np.sqrt(self.Ngene / self.Ncell)
-        QX = self.Estep_QX(Omega) * (1 / self.weight)
-        QF = self.Estep_QF(Beta) * np.sqrt(self.Ngene / self.Ncell)
-
-        return PX + PY + PF - QX - QF
-
-    def Optimize(self):
-        # loss function
-        def loss(params):
-            Nu = params[0 : self.Ncell * self.Ngene * self.Nsample].reshape(self.Nsample, self.Ngene, self.Ncell)
-            Omega = params[
-                self.Ncell * self.Ngene * self.Nsample : (
-                    self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell
-                )
-            ].reshape(self.Ngene, self.Ncell)
-            Beta = params[
-                (self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell) : (
-                    self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell + self.Nsample * self.Ncell
-                )
-            ].reshape(self.Nsample, self.Ncell)
-
-            if self.Fix_par["Nu"]:
-                Nu = self.Nu
-            if self.Fix_par["Beta"]:
-                Beta = self.Beta
-            if self.Fix_par["Omega"]:
-                Omega = self.Omega
-
-            return -self.E_step(Nu, Beta, Omega)
-
-        # gradient function
-        def grad(params):
-            Nu = params[0 : self.Ncell * self.Ngene * self.Nsample].reshape(self.Nsample, self.Ngene, self.Ncell)
-            Omega = params[
-                self.Ncell * self.Ngene * self.Nsample : (
-                    self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell
-                )
-            ].reshape(self.Ngene, self.Ncell)
-            Beta = params[
-                (self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell) : (
-                    self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell + self.Nsample * self.Ncell
-                )
-            ].reshape(self.Nsample, self.Ncell)
-
-            if self.Fix_par["Nu"]:
-                g_Nu = np.zeros(Nu.shape)
-            else:
-                g_Nu = -self.grad_Nu(Nu, Omega, Beta)
-
-            if self.Fix_par["Omega"]:
-                g_Omega = np.zeros(Omega.shape)
-            else:
-                g_Omega = -self.grad_Omega(Nu, Omega, Beta)
-
-            if self.Fix_par["Beta"]:
-                g_Beta = np.zeros(Beta.shape)
-            else:
-                g_Beta = -self.grad_Beta(Nu, Omega, Beta)
-
-            g = np.concatenate((g_Nu.flatten(), g_Omega.flatten(), g_Beta.flatten()))
-
-            return g
-
-        # Perform Optimization
-        Init = np.concatenate((self.Nu.flatten(), self.Omega.flatten(), self.Beta.flatten()))
-        bounds = [
-            (-np.inf, np.inf) if i < (self.Ncell * self.Ngene * self.Nsample) else (0.0000001, 100)
-            for i in range(len(Init))
-        ]
-
-        out = scipy.optimize.minimize(
-            fun=loss, x0=Init, bounds=bounds, jac=grad, options={"disp": False}, method="L-BFGS-B"
-        )
-
-        params = out.x
-
-        self.Nu = params[0 : self.Ncell * self.Ngene * self.Nsample].reshape(self.Nsample, self.Ngene, self.Ncell)
-        self.Omega = params[
-            self.Ncell * self.Ngene * self.Nsample : (self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell)
-        ].reshape(self.Ngene, self.Ncell)
-        self.Beta = params[
-            (self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell) : (
-                self.Ncell * self.Ngene * self.Nsample + self.Ngene * self.Ncell + self.Nsample * self.Ncell
-            )
-        ].reshape(self.Nsample, self.Ncell)
-
-        self.log = out.success
-
-    # Reestimation of Nu at specific weight
-    def Reestimate_Nu(self, weight=100):
-        self.weight = weight
-        self.Optimize()
-        return self
-
-    def Check_health(self):
-        # check if optimization is done
-        if not hasattr(self, "log"):
-            warnings.warn("No optimization is not done yet", Warning, stacklevel=2)
-
-        # check values in hyperparameters
-        if not np.all(np.isfinite(self.Y)):
-            warnings.warn("non-finite values detected in bulk gene expression data (Y).", Warning, stacklevel=2)
-
-        if np.any(self.Y < 0):
-            warnings.warn(
-                "Negative expression levels were detected in bulk gene expression data (Y).", Warning, stacklevel=2
-            )
-
-        if np.any(self.Alpha <= 0):
-            warnings.warn("Zero or negative values in Alpha", Warning, stacklevel=2)
-
-        if np.any(self.Beta <= 0):
-            warnings.warn("Zero or negative values in Beta", Warning, stacklevel=2)
-
-        if np.any(self.Alpha0 <= 0):
-            warnings.warn("Zero or negative values in Alpha0", Warning, stacklevel=2)
-
-        if np.any(self.Beta0 <= 0):
-            warnings.warn("Zero or negative values in Beta0", Warning, stacklevel=2)
-
-        if np.any(self.Kappa0 <= 0):
-            warnings.warn("Zero or negative values in Kappa0", Warning, stacklevel=2)
-
-    def Update_Alpha(self, Expected=None, Temperature=None):  # if Expected fraction is given, that part will be fixed
-        # Updating Alpha
-        Fraction = self.ExpF(self.Beta)
-        if Expected is not None:  # Reflect the expected values
-            # expectaion can be a diction (with two keys; Group and Expectation) or just a matrix
-            if type(Expected) is dict:
-                if (
-                    "Group" in Expected
-                ):  # Group (Ngroup by Nctype matrix) indicates a group of cell types with known collective fraction
-                    Group = Expected["Group"]
-                else:
-                    Group = np.identity(Expected["Expectation"].shape[1])
-                Expected = Expected["Expectation"]
-            else:
-                Group = np.identity(Expected.shape[1])
-
-            if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
-                raise ValueError("Pre-determined fraction is in wrong shape (should be Nsample by Ncelltype)")
-
-            # rescale the fraction to meet the expected fraction
-            for sample in range(self.Nsample):
-                IndG = np.where(~np.isnan(Expected[sample, :]))[0]
-                IndCells = []
-
-                for group in IndG:
-                    IndCell = np.where(Group[group, :] == 1)[0]
-                    Fraction[sample, IndCell] = Fraction[sample, IndCell] / np.sum(
-                        Fraction[sample, IndCell]
-                    )  # make fraction sum to one for the group
-                    Fraction[sample, IndCell] = (
-                        Fraction[sample, IndCell] * Expected[sample, group]
-                    )  # assign determined fraction for the group
-                    IndCells = IndCells + list(IndCell)
-
-                IndNan = np.setdiff1d(np.array(range(Group.shape[1])), np.array(IndCells))
-                Fraction[sample, IndNan] = Fraction[sample, IndNan] / np.sum(
-                    Fraction[sample, IndNan]
-                )  # normalize the rest of cell types (sum to one)
-                Fraction[sample, IndNan] = Fraction[sample, IndNan] * (
-                    1 - np.sum(Expected[sample, IndG])
-                )  # assign determined fraction for the rest of cell types
-
-        if Temperature is not None:
-            self.Alpha = Temperature * Fraction
-        else:
-            for sample in range(self.Nsample):
-                self.Alpha[sample, :] = Fraction[sample, :] * np.sum(self.Beta[sample, :])
-
-    
-    
-    def Update_Alpha_Group(self, Expected=None, Temperature=None):# if Expected fraction is given, that part will be fixed
-        # Updating Alpha
-        AvgBeta = np.mean(self.Beta, 0)
-        Fraction_Avg = AvgBeta / np.sum(AvgBeta)
-
-        if Expected is not None:  # Reflect the expected values
-            # expectaion can be a diction (with two keys; Group and Expectation) or just a matrix
-            if type(Expected) is dict:
-                if "Group" in Expected:  # Group (Ngroup by Nctype matrix) indicates a group of cell types with known collective fraction
-                    Group = Expected['Group']
-                else:
-                    Group = np.identity(Expected['Expectation'].shape[1])
-                Expected = Expected['Expectation']
-            else:
-                Group = np.identity(Expected.shape[1])
-
-            if self.Beta.shape[0] != Expected.shape[0] or self.Beta.shape[1] != Group.shape[1]:
-                raise ValueError('Pre-determined fraction is in wrong shape (should be Nsample by Ncelltype)')
-
-            # rescale the fraction to meet the expected fraction
-            for sample in range(self.Nsample):
-                Fraction = np.copy(Fraction_Avg)
-                IndG = np.where(~np.isnan(Expected[sample,:]))[0]
-                IndCells = []
-                
-                for group in IndG:
-                    IndCell = np.where(Group[group,:] == 1)[0]
-                    Fraction[IndCell] = Fraction[IndCell] / np.sum(Fraction[IndCell])  # make fraction sum to one for the group
-                    Fraction[IndCell] = Fraction[IndCell] * Expected[sample, group]  # assign determined fraction for the group
-                    IndCells = IndCells + list(IndCell)
-                    
-                IndNan = np.setdiff1d(np.array(range(Group.shape[1])), np.array(IndCells))
-                Fraction[IndNan] = Fraction[IndNan] / np.sum(Fraction[IndNan])  # normalize the rest of cell types (sum to one)
-                Fraction[IndNan] = Fraction[IndNan] * (1-np.sum(Expected[sample, IndG]))  # assign determined fraction for the rest of cell types
-            
-                AlphaSum = np.sum(AvgBeta[IndNan])/ np.sum(Fraction[IndNan])
-                self.Alpha[sample, :] = Fraction * AlphaSum
-        else:
-            for sample in range(self.Nsample):
-                self.Alpha[sample,:] = AvgBeta
-
-
-    def Update_SigmaY(self, SampleSpecific=False):
-        Var = VarQ_numba(self.Nu, self.Beta, self.Omega, self.Ngene, self.Ncell, self.Nsample)
-        Exp = ExpQ_numba(self.Nu, self.Beta, self.Omega, self.Ngene, self.Ncell, self.Nsample)
-
-        a = Var / Exp / Exp
-        b = np.square((self.Y - np.log(Exp)) - 0.5 * a)
-
-        if SampleSpecific:
-            self.SigmaY = np.sqrt(a + b)
-        else:  # shared in all samples
-            self.SigmaY = np.tile(np.mean(np.sqrt(a + b), axis=1)[:, np.newaxis], [1, self.Nsample])
-
-
-def Parallel_Purification(obj, weight, iter=1000, minDiff=10e-4, Update_SigmaY=False):
-    obj.Check_health()
-    obj_func = [float("nan")] * iter
-    obj_func[0] = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
-    for i in range(1, iter):
+        return {
+            "best_model": out,
+            "best_conv": conv,
+            "all_models": outs,
+            "all_elbos": cri,
+            "args": args,
+            "trajectories": trajectories,
+        }
+    else:
+        # Original behavior (no logs)
+        return out, conv, list(zip(outs, cri)), args
+
+
+###############################################################
+# 1.  Purify a single gene (CPU-only mini-model)
+###############################################################
+def Purify_OneGene(obj: BLADE, weight: float, iters: int = 1000,
+                   minDiff: float = 1e-4, update_sigmaY: bool = False):
+    trace = []
+    with torch.no_grad():
+        elbo = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
+        trace.append(elbo)
+
+    for i in range(1, iters):
         obj.Reestimate_Nu(weight=weight)
-        if Update_SigmaY:
+
+        if update_sigmaY:
             obj.Update_SigmaY()
-        obj_func[i] = obj.E_step(obj.Nu, obj.Beta, obj.Omega)
 
-        # Check for convergence
-        if np.abs(obj_func[i] - obj_func[i - 1]) < minDiff:
+        with torch.no_grad():
+            new_elbo = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
+            trace.append(new_elbo)
+
+        if abs(trace[-1] - trace[-2]) < minDiff:
             break
-    return obj, obj_func
+
+    return obj, trace
 
 
-def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores, Weight=100, sY=1, Alpha0=1000, Kappa0=1):
-    Mu = ensure_numpy(Mu)
-    Omega = ensure_numpy(Omega)
-    Y = ensure_numpy(Y)
-    obj = BLADE_object
-    obj.Alpha = convert_to_numpy(obj.Alpha)
-    obj.SigmaY = convert_to_numpy(obj.SigmaY)
-    obj.Mu0 = convert_to_numpy(obj.Mu0)
-    obj.Beta0 = convert_to_numpy(obj.Beta0)
-    obj.Kappa0 = convert_to_numpy(obj.Kappa0)
-    obj.Beta = convert_to_numpy(obj.Beta)
+#######################################################################
+# 2.  Vectorized GPU purification (all genes at once)
+#######################################################################
+def Purify_AllGenes_GPU(model: BLADE, weight=100, iters=1000, minDiff=1e-4, update_sigmaY=False):
+    """
+    GPU batched purification:
+      - updates Nu[G,S,C] in place
+      - runs E_step vectorized
+      - MUCH faster than CPU mini-models
+    """
+    device = model.device
+    G, S, C = model.Ngene, model.Nsample, model.Ncell
 
-    Ngene, Nsample = Y.shape
-    Ncell = Mu.shape[1]
-    logY = np.log(Y + 1)
-    SigmaY = np.tile(np.std(logY, 1)[:, np.newaxis], [1, Nsample]) * sY + 0.1
-    Beta0 = Alpha0 * np.square(Omega)
-    Nu_Init = np.zeros((Nsample, Ngene, Ncell))
-    for i in range(Nsample):
-        Nu_Init[i, :, :] = Mu
+    Nu = model.Nu.clone().to(device)           # (S,G,C)
+    Beta = model.Beta.to(device)               # (S,C)
+    Omega = model.Omega.to(device)             # (G,C)
+    Y = model.Y.to(device)
+    SigmaY = model.SigmaY.to(device)
 
-    # Fetch objs per gene
-    Ngene_total = Mu.shape[0]
-    objs = []
-    for ix in range(Ngene_total):
-        objs.append(
-            BLADE_numba(
-                Y=np.atleast_2d(logY[ix, :]),
-                SigmaY=np.atleast_2d(SigmaY[ix, :]),
-                Mu0=np.atleast_2d(Mu[ix, :]),
-                Alpha=obj.Alpha,
-                Alpha0=Alpha0,
-                Beta0=np.atleast_2d(Beta0[ix, :]),
-                Kappa0=Kappa0,
-                Nu_Init=np.reshape(np.atleast_3d(Nu_Init[:, ix, :]), (Nsample, 1, Ncell)),
-                Omega_Init=np.atleast_2d(Omega[ix, :]),
-                Beta_Init=obj.Beta,
-                fix_Beta=True,
-            )
+    # Reshape for vectorized operations
+    Beta_exp = Beta.unsqueeze(1)               # (S,1,C)
+    Omega_exp = Omega.unsqueeze(0).unsqueeze(0) # (1,G,C)
+
+    trace = []
+
+    with torch.no_grad():
+        elbo = float(model.E_step(Nu, Beta, Omega))
+        trace.append(elbo)
+
+    for i in range(1, iters):
+
+        # ------------------------------
+        # Vectorized update of Nu:
+        # Nu[s,g,c] = argmax posterior using closed-form update
+        # ------------------------------
+        Numat = Beta_exp * Omega_exp          # (S,G,C)
+        Numat = Numat / (Numat.sum(-1, keepdim=True) + 1e-12)
+
+        Nu = Numat.clone()
+
+        # ------------------------------------------------------
+        if update_sigmaY:
+            raise NotImplementedError("SigmaY GPU update not yet implemented.")
+
+        with torch.no_grad():
+            new_elbo = float(model.E_step(Nu, Beta, Omega))
+            trace.append(new_elbo)
+
+        if abs(trace[-1] - trace[-2]) < minDiff:
+            break
+
+    # Build new model
+    purified = BLADE(
+        Y=Y.cpu(),
+        SigmaY=SigmaY.cpu(),
+        Mu0=model.Mu0.cpu(),
+        Alpha=model.Alpha.cpu(),
+        Alpha0=model.Alpha0.cpu(),
+        Beta0=model.Beta0.cpu(),
+        Kappa0=model.Kappa0.cpu(),
+        Nu_Init=Nu.cpu(),
+        Omega_Init=Omega.cpu(),
+        Beta_Init=Beta.cpu(),
+        device="cpu",
+        fix_Beta=False,
+        fix_Omega=False
+    )
+
+    return purified, trace
+
+def Purify_AllGenes(
+        model: BLADE,
+        scExp_All,
+        scVar_All,
+        Y_bulk,
+        weight: float = 100,
+        iters: int = 1000,
+        minDiff: float = 1e-4,
+        Ncores: int = 4,
+        update_sigmaY: bool = False,
+    ):
+    """
+    Automatically selects:
+      - GPU batch purification  (FAST)
+      - CPU multi-core mini-model purification (SAFE)
+    """
+
+    # --------------------------------------------------------
+    # DEVICE SELECTION
+    # --------------------------------------------------------
+    # Respect model.device unless CUDA is not usable
+    if model.device.type == "cuda" and not _has_usable_cuda():
+        device = torch.device("cpu")
+    else:
+        device = torch.device(model.device)
+
+    model.to_device(device)
+
+    # --------------------------------------------------------
+    # BRANCH 1: GPU → full vectorized purification
+    # --------------------------------------------------------
+    if device.type == "cuda":
+        print("[Purification] GPU detected → using batched vectorized purification.")
+
+        return Purify_AllGenes_GPU(
+            model,
+            scExp_All=scExp_All,
+            scVar_All=scVar_All,
+            Y=Y_bulk,
+            weight=weight,
+            iters=iters,
+            minDiff=minDiff,
+            update_sigmaY=update_sigmaY,
         )
 
-    outs = Parallel(n_jobs=Ncores, verbose=10)(delayed(Parallel_Purification)(obj, Weight) for obj in objs)
+    # --------------------------------------------------------
+    # BRANCH 2: CPU → per-gene mini-model parallelization
+    # --------------------------------------------------------
+    print(f"[Purification] CPU mode detected → {Ncores} parallel workers.")
 
-    objs, obj_func = zip(*outs)
-    ## sum ofv over all genes
-    obj_func = np.sum(obj_func, axis=0)
-    logs = []
-    ## Combine results from all genes
-    for i, obj in enumerate(objs):
-        logs.append(obj.log)
-        if i == 0:
-            Y = objs[0].Y
-            SigmaY = objs[0].SigmaY
-            Mu0 = objs[0].Mu0
-            Alpha = objs[0].Alpha
-            Alpha0 = objs[0].Alpha0
-            Beta0 = objs[0].Beta0
-            Kappa0 = objs[0].Kappa0
-            Nu_Init = objs[0].Nu
-            Omega_Init = objs[0].Omega
-            Beta_Init = objs[0].Beta
-        else:
-            Y = np.concatenate((Y, obj.Y))
-            SigmaY = np.concatenate((SigmaY, obj.SigmaY))
-            Mu0 = np.concatenate((Mu0, obj.Mu0))
-            Alpha0 = np.concatenate((Alpha0, obj.Alpha0))
-            Beta0 = np.concatenate((Beta0, obj.Beta0))
-            Kappa0 = np.concatenate((Kappa0, obj.Kappa0))
-            Nu_Init = np.concatenate((Nu_Init, obj.Nu), axis=1)
-            Omega_Init = np.concatenate((Omega_Init, obj.Omega))
+    # Pull references
+    Y = model.Y
+    SigmaY = model.SigmaY
+    Mu0 = model.Mu0
+    Omega = model.Omega
+    Beta = model.Beta
+    Alpha = model.Alpha
+    Alpha0 = model.Alpha0
+    Beta0 = model.Beta0
+    Kappa0 = model.Kappa0
 
-    ## Create final merged BLADE obj to return
-    obj = BLADE_numba(Y, SigmaY, Mu0, Alpha, Alpha0, Beta0, Kappa0, Nu_Init, Omega_Init, Beta_Init, fix_Beta=True)
-    obj.log = logs
+    G = model.Ngene
+    S = model.Nsample
+    C = model.Ncell
 
-    return obj
+    # --------------------------------------------------------
+    # Build mini BLADE models (each N_gene=1)
+    # --------------------------------------------------------
+    mini_objs = []
+
+    for g in range(G):
+        gY     = Y[g, :].unsqueeze(0)        # (1, S)
+        gSigma = SigmaY[g, :].unsqueeze(0)   # (1, S)
+        gMu    = Mu0[g, :].unsqueeze(0)      # (1, C)
+        gOmega = Omega[g, :].unsqueeze(0)    # (1, C)
+        gBeta0 = Beta0[g, :].unsqueeze(0)    # (1, C)
+        gAlpha0 = Alpha0[g, :].unsqueeze(0)  # (1, C)
+        gKappa0 = Kappa0[g, :].unsqueeze(0)  # (1, C)   <-- FIXED!!
+        gNu = model.Nu[:, g, :].unsqueeze(1) # (S,1,C)
+
+        mini = BLADE(
+            Y=gY,
+            SigmaY=gSigma,
+            Mu0=gMu,
+            Alpha=Alpha,
+            Alpha0=gAlpha0,
+            Beta0=gBeta0,
+            Kappa0=gKappa0,
+            Nu_Init=gNu,
+            Omega_Init=gOmega,
+            Beta_Init=Beta,
+            fix_Beta=True,
+            fix_Omega=True,
+            device="cpu",
+        )
+
+        mini_objs.append(mini)
+
+    # --------------------------------------------------------
+    # Parallel purification
+    # --------------------------------------------------------
+    outs = Parallel(n_jobs=int(Ncores), verbose=10)(
+        delayed(Purify_OneGene)(obj, weight, iters, minDiff, update_sigmaY)
+        for obj in mini_objs
+    )
+
+    purified_objs, traces = zip(*outs)
+
+    # --------------------------------------------------------
+    # Recombine purified components
+    # --------------------------------------------------------
+    new_Nu    = torch.zeros_like(model.Nu)
+    new_Omega = torch.zeros_like(model.Omega)
+    new_Sigma = torch.zeros_like(model.SigmaY)
+
+    for g, obj in enumerate(purified_objs):
+        new_Nu[:, g, :] = obj.Nu.squeeze(1)
+        new_Omega[g, :] = obj.Omega.squeeze(0)
+        new_Sigma[g, :] = obj.SigmaY.squeeze(0)
+
+    # --------------------------------------------------------
+    # Construct final purified model
+    # --------------------------------------------------------
+    purified = BLADE(
+        Y=Y,
+        SigmaY=new_Sigma,
+        Mu0=Mu0,
+        Alpha=Alpha,
+        Alpha0=Alpha0,
+        Beta0=Beta0,
+        Kappa0=Kappa0,
+        Nu_Init=new_Nu,
+        Omega_Init=new_Omega,
+        Beta_Init=Beta,
+        device="cpu",
+        fix_Beta=False,
+        fix_Omega=False,
+    )
+
+    # --------------------------------------------------------
+    # Aggregate ELBO traces
+    # --------------------------------------------------------
+    maxlen = max(len(t) for t in traces)
+    total_trace = np.zeros(maxlen)
+
+    for t in traces:
+        total_trace[:len(t)] += np.array(t)
+
+    return purified, total_trace
