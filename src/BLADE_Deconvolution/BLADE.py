@@ -578,7 +578,7 @@ class BLADE:
         ###but for now keep f64 for numerical stability###
         for name in ["Y", "Mu0", "SigmaY", "Alpha", "Alpha0", "Beta0", "Kappa0", "Omega", "Nu", "Beta", "weight"]:
             t = getattr(self, name)
-            setattr(self, name, t.to(self.device, dtype=torch.float64))
+            setattr(self, name, t.to(self.device, dtype=torch.float32))
 
         #     # 4) Enable fast matmul on Ampere/Hopper
         # torch.backends.cuda.matmul.allow_tf32 = True
