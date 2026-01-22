@@ -573,8 +573,7 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
 
     :returns: Statescope object initialized with the given parameters.
     """
-    available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
-  #subset Markers if supplied before creating signature 
+    #subset Markers if supplied before creating signature 
     if Signature is not None:
         if isinstance(Signature, pd.DataFrame):
             Signature = Check_Signature_validity(Signature)
@@ -590,6 +589,7 @@ def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', Mar
                 drop_sigdiff= drop_sigdiff)      # if bulk and drop_sigdiff are true will calculate the and remove genes that differ significantly in expression between the two datasets
             
     else:
+        available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
         if TumorType == '' or TumorType not in available_signatures:
             error_msg = "TumorType not specified or invalid. Available options include:\n"
             for t, cells in available_signatures.items():
