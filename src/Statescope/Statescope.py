@@ -28,29 +28,66 @@ Statescope_model.StateDiscovery()
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # 0.1  Import Libraries
 # -------------------------------------------------------------------------------
-from BLADE_Deconvolution.CreateSignature import CreateSignature
-
-
-from BLADE_Deconvolution.BLADE import Framework_Iterative, Purify_AllGenes
-from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval, EcoTypeDiscovery_FrameWork
-import StateDiscovery.cNMF
-from StateDiscovery.lib import pymf
-import pandas as pd
-import numpy as np
-from collections.abc import Iterable
-import anndata as ad
+# ======================================================
+# Standard library
+# ======================================================
+import os
+import io
+import time
+import pickle
+import warnings
 from glob import glob
-import seaborn as sns
-import matplotlib.pyplot as plt
+from io import StringIO
+from collections.abc import Iterable
+
+# ======================================================
+# Scientific computing & data
+# ======================================================
+import numpy as np
+import pandas as pd
+import anndata as ad
+
+# ======================================================
+# Machine learning
+# ======================================================
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
-import requests
-from io import StringIO
-import os
-import warnings
-import pickle
+
+# ======================================================
+# Visualization
+# ======================================================
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ======================================================
+# Deep learning
+# ======================================================
 import torch
-import io
+
+# ======================================================
+# Networking
+# ======================================================
+import requests
+
+# ======================================================
+# Project: BLADE Deconvolution
+# ======================================================
+from BLADE_Deconvolution.CreateSignature import CreateSignature
+from BLADE_Deconvolution.BLADE import (
+    Framework_Iterative,
+    Purify_AllGenes,
+)
+
+# ======================================================
+# Project: State Discovery
+# ======================================================
+from StateDiscovery.cNMF import (
+    StateDiscovery_FrameWork,
+    StateRetrieval,
+    EcoTypeDiscovery_FrameWork,
+)
+import StateDiscovery.cNMF
+from StateDiscovery.lib import pymf
 
 
 def _count_tensors(obj):
@@ -304,31 +341,32 @@ class Statescope:
         raise TypeError(f"Unsupported payload type in '{filepath}': expected dict or {cls.__name__}, got {type(state)}")
 
     def Deconvolution(
-        self,
-        Ind_Marker=None,
-        Alpha=1,
-        Alpha0=1000,
-        Kappa0=1,
-        sY=1,
-        Nrep=10,
-        Njob=10,
-        fsel=0,
-        Update_SigmaY=False,
-        Init_Trust=10,
-        Expectation=None,
-        Temperature=None,
-        IterMax=1000,
-        *,
-        warm_start: bool = False,
-        adam_params: dict = None,
-        lbfgs_params: dict = None,
-        backend: str = "auto",
-        threads_per_job: int | None = None,
-        collect_logs: bool = False,   # <---- NEW
-    ):
+            self,
+            Ind_Marker=None,
+            Alpha=1,
+            Alpha0=1000,
+            Kappa0=1,
+            sY=1,
+            Nrep=10,
+            Njob=10,
+            fsel=0,
+            Update_SigmaY=False,
+            Init_Trust=10,
+            Expectation=None,
+            Temperature=None,
+            IterMax=1000,
+            *,
+            warm_start: bool = False,
+            adam_params: dict = None,
+            lbfgs_params: dict = None,
+            backend: str = "auto",
+            threads_per_job: int | None = None,
+            collect_logs: bool = False,
+        ):
         """
         Perform BLADE Deconvolution
         """
+        _t0 = time.perf_counter()
 
         # Prepare Signature with markers only
         scExp_marker = self.scExp.loc[self.Markers, :].to_numpy()
@@ -370,29 +408,25 @@ class Statescope:
             lbfgs_params=lbfgs_params,
             backend=backend,
             threads_per_job=threads_per_job,
-            collect_logs=collect_logs,          # <---- ENABLE LOGGING
+            collect_logs=collect_logs,
         )
 
         # ----------------------------------------
         # HANDLE RETURN SHAPE
         # ----------------------------------------
-
         if collect_logs:
-            # New dictionary return
             final_obj = out["best_model"]
             best_conv = out["best_conv"]
             best_set = list(zip(out["all_models"], out["all_elbos"]))
             outs = out["all_models"]
-            self.deconv_logs = out          # <---- SAVE EVERYTHING HERE
+            self.deconv_logs = out
         else:
-            # Classic 4-tuple return
             final_obj, best_conv, best_set, outs = out
-            self.deconv_logs = None         # <--- no logs
+            self.deconv_logs = None
 
         # ----------------------------------------
         # Save core outputs like before
         # ----------------------------------------
-
         self.BLADE = final_obj
 
         self.Fractions = pd.DataFrame(
@@ -409,17 +443,44 @@ class Statescope:
         else:
             print("Warning: Model did not converge, estimates might not be optimal.")
 
-        return final_obj   # unchanged for external scripts
+        _t1 = time.perf_counter()
+        dt = _t1 - _t0
+        h = int(dt // 3600)
+        m = int((dt % 3600) // 60)
+        s = dt % 60
+        if h > 0:
+            print(f"[Deconvolution]: Total Time: {h:d}h {m:02d}m {s:06.3f}s")
+        elif m > 0:
+            print(f"[Deconvolution]: Total Time: {m:d}m {s:06.3f}s")
+        else:
+            print(f"[Deconvolution]: Total Time: {s:.3f}s")
+
+        return final_obj
 
 
-    # Perform Gene Expression Refinement
-    def Refinement(self, weight=100, GeneList=None, njob=10):
+    
+    def Refinement(self, weight=100, GeneList=None, Njob=None):
         """
         Perform Gene expression refinement with all genes.
+
+        Parameters
+        ----------
+        weight : float
+            Purification weight
+        GeneList : list or None
+            Optional subset of genes
+        Njob : int or None
+            Number of parallel jobs. If None, defaults to self.Ncores
         """
+        _t0 = time.perf_counter()
 
         if not self.isDeconvolutionDone:
             raise Exception("Deconvolution must be completed before Refinement.")
+
+        # ------------------------
+        # Resolve number of jobs
+        # ------------------------
+        n_jobs = self.Ncores if Njob is None else int(Njob)
 
         # ------------------------
         # Subset genes
@@ -428,25 +489,22 @@ class Statescope:
             self.Genes = [gene for gene in self.Genes if gene in GeneList]
 
         # Prepare signature matrices
-        scExp_All = self.scExp.loc[self.Genes, :]
-        scVar_All = self.scVar.loc[self.Genes, :]
+        scExp_All = self.scExp.loc[self.Genes, :].to_numpy()
+        scVar_All = self.scVar.loc[self.Genes, :].to_numpy()
 
         # Prepare Bulk (select matched genes)
-        Y = self.Bulk.loc[self.Genes, self.Samples]
+        Y = self.Bulk.loc[self.Genes, self.Samples].to_numpy()
 
         # ------------------------
         # RUN PURIFICATION
         # ------------------------
-        obj, total_trace = Purify_AllGenes(
+        obj = Purify_AllGenes(
             self.BLADE,
             scExp_All,
             scVar_All,
             Y,
-            Ncores=njob,
-            weight=weight,
-            iters=1000,
-            minDiff=1e-4,
-            update_sigmaY=False,
+            n_jobs,     # <-- user override applied here
+            weight
         )
 
         # ------------------------
@@ -454,8 +512,7 @@ class Statescope:
         # ------------------------
         GEX = {}
         for i, ct in enumerate(self.Celltypes):
-            # obj.Nu[:, :, i] shape = (Samples, Genes)
-            mat = obj.Nu[:, :, i].detach().cpu().numpy()
+            mat = obj.Nu[:, :, i]
             GEX[ct] = pd.DataFrame(mat, index=self.Samples, columns=self.Genes)
 
         # ------------------------
@@ -463,7 +520,7 @@ class Statescope:
         # ------------------------
         Omega = {}
         for i, ct in enumerate(self.Celltypes):
-            vec = obj.Omega[:, i].detach().cpu().numpy()
+            vec = obj.Omega[:, i]
             Omega[ct] = pd.DataFrame(vec, index=self.Genes, columns=[ct])
 
         # ------------------------
@@ -476,6 +533,18 @@ class Statescope:
 
         print("Refinement completed successfully.")
 
+        _t1 = time.perf_counter()
+        dt = _t1 - _t0
+        h = int(dt // 3600)
+        m = int((dt % 3600) // 60)
+        s = dt % 60
+        if h > 0:
+            print(f"[Refinement]: Total Time: {h:d}h {m:02d}m {s:06.3f}s")
+        elif m > 0:
+            print(f"[Refinement]: Total Time: {m:d}m {s:06.3f}s")
+        else:
+            print(f"[Refinement]: Total Time: {s:.3f}s")
+
 
     def StateDiscovery(
         self,
@@ -486,61 +555,29 @@ class Statescope:
         n_final_iter: int = 100,
         min_cophenetic: float = 0.9,
         max_clusters: int = 10,
+        Njob: int | None = None,
     ):
         """
-
         Perform StateDiscovery from ctSpecificGEX using cNMF.
-
-        :param celltype: List of cell types or a single cell type for which to perform state discovery.
-                        If None, will use all available cell types from the data.
-        :param K: List or single value of number of states to consider for each cell type.
-                If None, an optimal K is determined.
-        :param weighing: Method to weigh the data, default is 'Omega'.
-        :param n_iter: Number of initial cNMF restarts.
-        :param n_final_iter: Number of final cNMF restarts.
-        :param min_cophenetic: Minimum cophenetic coefficient to determine K.
-        :param max_clusters: Maximum number of clusters/states to consider.
-        :param celltype : str | list[str] | None, optional
-        Cell types to analyse (default = all stored in the object).
-
-        :param K : int | list[int] | dict[str, int] | None, optional
-            • None   – each cell type gets an automatically chosen k
-            • int    – the same k for every cell type (celltype filter ignored)
-            • list   – one k per entry in `celltype` (same order)
-            • dict   – give k for selected cell types; the rest are automatic
-
-        **Examples**
-
-        >>> Model.StateDiscovery(K=2)
-        Forces k = 2 for *every* cell type.
-
-        >>> Model.StateDiscovery(celltype='Monocyte')
-        Analyses only Monocytes; k picked automatically.
-
-        >>> Model.StateDiscovery(K={'Monocyte': 2})
-        Monocytes fixed at k = 2; every other cell type analysed with
-        automatic k.
-
-        >>> Model.StateDiscovery(celltype=['T', 'B'], K=[4, 5])
-        T cells get k = 4, B cells k = 5; no other cell types analysed.
-
         """
 
-        # 0) checks
+        _t0 = time.perf_counter()
 
+        # ------------------------
+        # 0) checks
+        # ------------------------
         if not self.isRefinementDone:
             raise RuntimeError("Run Refinement before StateDiscovery.")
 
-        all_celltypes = list(self.Celltypes)  # stored when the object was built
+        n_jobs = self.Ncores if Njob is None else int(Njob)
+        all_celltypes = list(self.Celltypes)
 
-        # 1) normalise `celltype` argument
-
+        # ------------------------
+        # 1) normalise `celltype`
+        # ------------------------
         if isinstance(K, int):
-            # K is a single integer → analyse *all* cell types,
-            # ignoring any `celltype` argument the caller provided.
             celltype_run = all_celltypes
         else:
-            # otherwise use the caller's list, defaulting to all
             if celltype is None:
                 celltype_run = all_celltypes
             elif isinstance(celltype, str):
@@ -548,58 +585,63 @@ class Statescope:
             else:
                 celltype_run = list(celltype)
 
-            # if K is a dict, include those keys too
             if isinstance(K, dict):
                 celltype_run = list(K.keys())
 
-        # 2) build K-mapping {celltype: k or None}
-
+        # ------------------------
+        # 2) build K-map
+        # ------------------------
         if K is None:
             Kmap = {ct: None for ct in celltype_run}
-
         elif isinstance(K, int):
             Kmap = {ct: K for ct in celltype_run}
-
         elif isinstance(K, list):
             if len(K) != len(celltype_run):
                 raise ValueError("Length of K list must equal number of cell types.")
             Kmap = dict(zip(celltype_run, K))
-
         elif isinstance(K, dict):
             Kmap = K
-
         else:
             raise TypeError("K must be int, list, dict, or None.")
 
-        # 3) run cNMF / state discovery per cell type
-
+        # ------------------------
+        # 3) run cNMF
+        # ------------------------
         State_dict, CopheneticCoefficients = {}, {}
         StateScores, StateLoadings = {}, {}
 
         for ct in celltype_run:
-            print(f"Performing cNMF State Discovery for {ct}")
+            print(f"[StateDiscovery] Running cNMF for {ct} (n_jobs={n_jobs})")
+
             model, coph = StateDiscovery_FrameWork(
                 self.GEX[ct],
                 self.Omega[ct],
                 self.Fractions,
                 ct,
                 weighing,
-                Kmap[ct],  # may be None → auto
+                Kmap[ct],
                 n_iter,
                 n_final_iter,
                 min_cophenetic,
                 max_clusters,
-                self.Ncores,
+                n_jobs,
             )
 
             State_dict[ct] = model
             CopheneticCoefficients[ct] = coph
             StateScores[ct] = pd.DataFrame(
-                np.apply_along_axis(lambda x: x / sum(x), 1, model.H.T), index=self.Samples
+                np.apply_along_axis(lambda x: x / x.sum(), 1, model.H.T),
+                index=self.Samples,
             ).add_prefix(f"{ct}_")
-            StateLoadings[ct] = pd.DataFrame(model.W, index=self.Genes).add_prefix(f"{ct}_")
 
-        # 4) stash results in the object
+            StateLoadings[ct] = (
+                pd.DataFrame(model.W, index=self.Genes)
+                .add_prefix(f"{ct}_")
+            )
+
+        # ------------------------
+        # 4) store
+        # ------------------------
         if not hasattr(self, "cNMF"):
             self.cNMF = State_dict
             self.CopheneticCoefficients = CopheneticCoefficients
@@ -611,7 +653,13 @@ class Statescope:
             self.StateScores.update(StateScores)
             self.StateLoadings.update(StateLoadings)
 
-        print("StateDiscovery completed successfully.")
+        # ------------------------
+        # timing
+        # ------------------------
+        dt = time.perf_counter() - _t0
+        print(f"[StateDiscovery]: completed in {dt/60:.2f} min")
+
+
 
     def EcotypeDiscovery(
         self,
@@ -619,66 +667,61 @@ class Statescope:
         n_iter: int = 10,
         n_final_iter: int = 100,
         min_cophenetic: float = 0.9,
-        max_clusters: int = 10):
+        max_clusters: int = 10,
+        Njob: int | None = None,
+    ):
         """
-         
         Perform EcoTypeDiscovery from StateScores using cNMF.
-
-        :param K: single value of number of states to consider.
-                If None, an optimal K is determined.
-        :param n_iter: Number of initial cNMF restarts.
-        :param n_final_iter: Number of final cNMF restarts.
-        :param min_cophenetic: Minimum cophenetic coefficient to determine K.
-        :param max_clusters: Maximum number of clusters/states to consider.
-
-        :param K : int  None, optional
-            • None   – automatically chooses k  
-            • int    – force k to specific number 
-
-        **Examples**
-
-        >>> Model.EcoTypeDiscovery(K=2)
-        Forces k = 2.
-
-        >>> Model.EcoTypeDiscovery()
-        K picked automatically.
-                
         """
-        
-        # 0) checks                                         
-        
+
+        _t0 = time.perf_counter()
+
+        # ------------------------
+        # 0) checks
+        # ------------------------
         if not self.isStateDiscoveryDone:
             raise RuntimeError("Run StateDiscovery before EcoTypeDiscovery.")
-        
-        # 1) run cNMF / EcoTypeDiscovery               
-        print('Performing cNMF EcoType Discovery')
-        model, coph = EcoTypeDiscovery_FrameWork(
-                Extract_StateScores(self),
-                K,                 # may be None → auto
-                n_iter,
-                n_final_iter,
-                min_cophenetic,
-                max_clusters,
-                self.Ncores)
-        
-        EcoType_cNMF = model
-        EcoType_CopheneticCoefficients = coph
-        EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
-        EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
-             
-        # 2) stash results in the object                               
-        if not hasattr(self, 'EcoType_cNMF'):
-            self.EcoType_cNMF                   = EcoType_cNMF
-            self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
-            self.EcoTypeScores            = EcoTypeScores
-            self.EcoTypeLoadings          = EcoTypeLoadings
-            self.isEcoTypeDiscoveryDone   = True
-        else:
-            self.EcoType_cNMF = EcoType_cNMF
-            self.EcoTypeScores = EcoTypeScores
-            self.EcoTypeLoadings = EcoTypeLoadings
 
-        print("EcoTypeDiscovery completed successfully.")
+        n_jobs = self.Ncores if Njob is None else int(Njob)
+
+        # ------------------------
+        # 1) run cNMF
+        # ------------------------
+        print(f"[EcoTypeDiscovery] Running cNMF (n_jobs={n_jobs})")
+
+        model, coph = EcoTypeDiscovery_FrameWork(
+            Extract_StateScores(self),
+            K,
+            n_iter,
+            n_final_iter,
+            min_cophenetic,
+            max_clusters,
+            n_jobs,
+        )
+
+        EcoTypeScores = pd.DataFrame(
+            np.apply_along_axis(lambda x: x / x.sum(), 1, model.H.T),
+            index=self.Samples,
+        )
+        EcoTypeLoadings = pd.DataFrame(
+            model.W,
+            index=get_StateNames(self),
+        )
+
+        # ------------------------
+        # 2) store
+        # ------------------------
+        self.EcoType_cNMF = model
+        self.EcoType_CopheneticCoefficients = coph
+        self.EcoTypeScores = EcoTypeScores
+        self.EcoTypeLoadings = EcoTypeLoadings
+        self.isEcoTypeDiscoveryDone = True
+
+        # ------------------------
+        # timing
+        # ------------------------
+        dt = time.perf_counter() - _t0
+        print(f"[EcoTypeDiscovery]: completed in {dt/60:.2f} min")
 
 
 
@@ -692,19 +735,8 @@ def get_StateNames(self):
 # -------------------------------------------------------------------------------
 # 1.2  Define Statescope Initialization
 # -------------------------------------------------------------------------------
-def Initialize_Statescope(
-    Bulk,
-    Signature=None,
-    TumorType="",
-    Ncelltypes="",
-    MarkerList=None,
-    celltype_key="celltype",
-    n_highly_variable=3000,
-    Ncores=10,
-    fixed_n_features=None,
-    drop_sigdiff=False,
-):
-    """
+def Initialize_Statescope(Bulk, Signature=None, TumorType='', Ncelltypes='', MarkerList=None, celltype_key='celltype', n_highly_variable=3000, Ncores=10, fixed_n_features=None, drop_sigdiff = False):
+    """ 
     Initializes Statescope object with Bulk and Signature.
 
     :param pandas.DataFrame Bulk: Bulk Gene expression matrix: linear, library-size-corrected counts are expected.
@@ -719,48 +751,45 @@ def Initialize_Statescope(
 
     :returns: Statescope object initialized with the given parameters.
     """
-    available_signatures = (
-        list_available_signatures()
-    )  # Fetch the structured list of available tumor types and cell types
-    # subset Markers if supplied before creating signature
+    #subset Markers if supplied before creating signature 
     if Signature is not None:
         if isinstance(Signature, pd.DataFrame):
             Signature = Check_Signature_validity(Signature)
         elif isinstance(Signature, ad.AnnData):
-            Signature = CreateSignature(
+             Signature = CreateSignature(
                 Signature,
                 celltype_key=celltype_key,
                 CorrectVariance=True,
-                n_highly_variable=n_highly_variable,  # hvg genes for autogenes parameter
-                fixed_n_features=fixed_n_features,  # autogene number of genes paramter
-                MarkerList=MarkerList,  # will use marker list instead of autogenes
-                Bulk=Bulk,
-                drop_sigdiff=drop_sigdiff,
-            )  # if bulk and drop_sigdiff are true will calculate the and remove genes that differ significantly in expression between the two datasets
-
+                n_highly_variable=n_highly_variable, #hvg genes for autogenes parameter
+                fixed_n_features=fixed_n_features, # autogene number of genes paramter 
+                MarkerList=MarkerList,          #will use marker list instead of autogenes 
+                Bulk = Bulk,
+                drop_sigdiff= drop_sigdiff)      # if bulk and drop_sigdiff are true will calculate the and remove genes that differ significantly in expression between the two datasets
+            
     else:
-        if TumorType == "" or TumorType not in available_signatures:
+        available_signatures = list_available_signatures()  # Fetch the structured list of available tumor types and cell types
+        if TumorType == '' or TumorType not in available_signatures:
             error_msg = "TumorType not specified or invalid. Available options include:\n"
             for t, cells in available_signatures.items():
                 error_msg += f"{t}: {', '.join(cells)} cell types\n"
             raise ValueError(error_msg)
-
-        if Ncelltypes == "":
+        
+        if Ncelltypes == '':
             # Select the signature with the smallest number of cell types if Ncelltypes is not specified
             Ncelltypes = min(available_signatures[TumorType], key=int)
-
+        
         Signature = fetch_signature(TumorType, Ncelltypes)
         if Signature is None:
             error_msg = f"No signature available for {TumorType} with {Ncelltypes} cell types. Available cell types for {TumorType} are:\n"
-            error_msg += ", ".join(available_signatures[TumorType])
+            error_msg += ', '.join(available_signatures[TumorType])
             raise ValueError(error_msg)
         Signature = Check_Signature_validity(Signature)
     if MarkerList:
-        Signature["IsMarker"] = Signature.index.isin(MarkerList)
+        Signature['IsMarker'] = Signature.index.isin(MarkerList)
 
     # Continue with the initialization as before
     Samples = Bulk.columns.tolist()
-    Celltypes = [col.split("scExp_")[1] for col in Signature.columns if "scExp_" in col]
+    Celltypes = [col.split('scExp_')[1] for col in Signature.columns if 'scExp_' in col]
     Genes = [gene for gene in Bulk.index if gene in Signature.index]
 
     Signature = Signature.loc[Genes, :]
@@ -768,8 +797,8 @@ def Initialize_Statescope(
     Bulk = Bulk.loc[Genes, :]
     Markers = Signature[Signature.IsMarker].index.tolist()
 
-    Omega_columns = ["scVar_" + ct for ct in Celltypes]
-    Mu_columns = ["scExp_" + ct for ct in Celltypes]
+    Omega_columns = ['scVar_' + ct for ct in Celltypes]
+    Mu_columns = ['scExp_' + ct for ct in Celltypes]
 
     # Print the number of common markers
     common_markers = set(Markers).intersection(Bulk.index)
@@ -779,11 +808,9 @@ def Initialize_Statescope(
     common_genes = set(Genes).intersection(Signature.index)
     print(f"Number of genes common between Bulk and Signature: {len(common_genes)}")
 
-    Statescope_object = Statescope(
-        Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores
-    )
-    return Statescope_object
 
+    Statescope_object = Statescope(Bulk, Signature[Mu_columns], Signature[Omega_columns], Samples, Celltypes, Genes, Markers, Ncores)
+    return Statescope_object
 
 # -------------------------------------------------------------------------------
 # 1.2  Miscellaneous functions
