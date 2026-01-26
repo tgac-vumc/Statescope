@@ -31,7 +31,7 @@ from BLADE_Deconvolution.CreateSignature import CreateSignature
 
 
 from BLADE_Deconvolution.BLADE import Framework_Iterative,Purify_AllGenes
-from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval, EcoTypeDiscovery_FrameWork
+from StateDiscovery.cNMF import StateDiscovery_FrameWork, StateRetrieval, EcoTypeDiscovery_FrameWork, EcotypeRetrieval
 import StateDiscovery.cNMF
 from StateDiscovery.lib import pymf
 import pandas as pd
@@ -752,7 +752,14 @@ def Extract_StateScores(Statescope_model, celltype = None):
 
     # Extract the StateScores DataFrame
     if celltype == None:
-        state_scores = pd.concat(Statescope_model.StateScores.values(), axis=1)
+      # Rename columns to include celltype
+      renamed_dfs = []
+      for celltype, df in Statescope_model.StateScores.items():
+        new_cols = {col: f"{celltype}_{col}" for col in df.columns}
+        renamed_dfs.append(df.rename(columns=new_cols))
+
+        # Concatenate horizontally
+        state_scores = pd.concat(renamed_dfs, axis=1)
     else:
         state_scores = Statescope_model.StateScores[celltype]
 

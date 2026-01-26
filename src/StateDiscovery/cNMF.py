@@ -224,7 +224,26 @@ def EcoTypeDiscovery_FrameWork(state_scores,
         return cNMF_model, cophcors_final  # single float
 
 
+# EcotypeRetrieval: Calculate Ecotype scores with predefined ecotype loadings in external dataset
+def EcotypeRetrieval(Statescores, EcotypeLoadings):
+    """
+      Run cNMF‐based ecotype-retrieval with predefined Ecotypeloadings.
 
+      :param Statescores: Retrieved Statescores from StateRetrieval of external dataset
+      :param EcotypeLoadings: EcotypeLoadings from ecotype discovery of external dataset
+      
+      :return: ``EcotypeScores``, EcotypeScores of Ecotypes retrieved in new data
+    """
+    # Check if retrieved states are the same as states in ecotype loadings
+    if not Statescores.columns.to_list() == EcotypeLoadings.index.to_list():
+        raise AttributeError("StateScores are not of same states as EcotypeLoadings. Check if Statescores are actually recovered from same external dataset")
+    
+    ## Adjust statescores to numpy array for use in cNMF_Retrieval
+    Statescores = Statescores.to_numpy()
+    # Run cNMF recovery
+    cNMF_model = cNMF_Retrieval(Statescores, EcotypeLoadings)
+    EcotypeScores = pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,cNMF_model.H.T))
+    return EcotypeScores
     
 
 
