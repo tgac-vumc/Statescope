@@ -528,6 +528,7 @@ class BLADE:
         fix_Nu=False,
         fix_Omega=False,
         device=None,
+        lambda_F=0.0
     ):
         self._trajectory = []
 
@@ -665,6 +666,11 @@ class BLADE:
                 self.E_step = torch.compile(self.E_step, mode="reduce-overhead")
             except Exception:
                 pass
+
+        self.lambda_F = float(lambda_F)
+        
+    def set_lambda_F(self, value):
+            self.lambda_F = float(value)
 
     def to_device(self, device):
         device = torch.device(device)
@@ -846,7 +852,7 @@ class BLADE:
 
         
 
-        return grad_PY + grad_PF * scaling_factor - grad_QF * scaling_factor
+        return grad_PY + self.lambda_F * (grad_PF * scaling_factor - grad_QF * scaling_factor)
     
 
     ###Define ELBO
@@ -859,7 +865,7 @@ class BLADE:
         QF = self.Estep_QF(Beta) *(self.Ngene / self.Ncell)**0.5
 
 
-        return PX+PY+PF-QX-QF
+        return PX + PY - QX + self.lambda_F * (PF - QF)
 
     ##Helping functions for optimization
 
@@ -1294,7 +1300,7 @@ def Iterative_Optimization(
 
     # Create BLADE object
     obj = BLADE(logY, SigmaY, Mu0, Alpha, Alpha0, Beta0,
-                Kappa0, Nu_Init, Omega_Init, Beta_Init, device=device)
+                Kappa0, Nu_Init, Omega_Init, Beta_Init, device=device, lambda_F=0.0)
 
     # Track ELBO
     obj_func = [None] * iter
@@ -1307,8 +1313,10 @@ def Iterative_Optimization(
     # NEW: record snapshot at iteration 0
     obj.snapshot(iter_idx=0)
 
-    # ---- Main optimization loop ----
     for i in range(1, iter):
+        lam = min(0.0001 * i, 1.0)
+        obj.set_lambda_F(lam)
+
         if i == 1 and warm_start:
             obj.Optimize(
                 method="adam",
@@ -1318,6 +1326,11 @@ def Iterative_Optimization(
                 grad_clip=adam_params.get("grad_clip"),
                 amp_grads=False
             )
+            obj.Update_Alpha_Group(Expected=Expected)
+
+            if Update_SigmaY:
+                obj.Update_SigmaY()
+
         else:
             try:
                 obj.Optimize(
@@ -1330,41 +1343,43 @@ def Iterative_Optimization(
                     grad_clip=lbfgs_params.get("grad_clip"),
                     amp_grads=False
                 )
-                
-                if Expected is not None:
-                    obj.Update_Alpha_Group(Expected=Expected)
+
+                obj.Update_Alpha_Group(Expected=Expected)
+
                 if Update_SigmaY:
                     obj.Update_SigmaY()
+
             except Exception as e:
                 print(f"[WARN] optimisation failed at iter {i} rep {Rep} ({e})]")
 
+        print(f"[Rep {Rep}] iter {i} lambda_F = {obj.lambda_F}")
 
+        obj.Fix_par['Nu'] = False; obj.Fix_par['Omega'] = True;  obj.Fix_par['Beta'] = True
+        obj.Optimize(
+            method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+            line_search_fn="strong_wolfe"
+        )
 
-        obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=True
-        obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                    line_search_fn="strong_wolfe")
+        obj.Fix_par['Nu'] = True;  obj.Fix_par['Omega'] = False; obj.Fix_par['Beta'] = True
+        obj.Optimize(
+            method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+            line_search_fn="strong_wolfe"
+        )
 
-        obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=True
-        obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                    line_search_fn="strong_wolfe")
+        obj.Fix_par['Nu'] = True;  obj.Fix_par['Omega'] = True;  obj.Fix_par['Beta'] = False
+        obj.Optimize(
+            method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
+            line_search_fn="strong_wolfe"
+        )
 
-        obj.Fix_par['Nu']=True; obj.Fix_par['Omega']=True; obj.Fix_par['Beta']=False
-        obj.Optimize(method="lbfgs", steps=12, lr=0.05, max_iter=20, history_size=100,
-                    line_search_fn="strong_wolfe")
+        obj.Fix_par['Nu'] = False; obj.Fix_par['Omega'] = False; obj.Fix_par['Beta'] = False
 
-        obj.Fix_par['Nu']=False; obj.Fix_par['Omega']=False; obj.Fix_par['Beta']=False
-
-
-
-        # Evaluate ELBO
         with torch.no_grad():
             obj_val = float(obj.E_step(obj.Nu, obj.Beta, obj.Omega))
             obj_func[i] = obj_val
 
-        # NEW: snapshot at iteration i
         obj.snapshot(iter_idx=i)
 
-        # Convergence checks
         if not np.isfinite(obj_val):
             print(f"[WARN] non-finite ELBO at outer iter {i} rep {Rep}; stopping.")
             obj_func = obj_func[: i + 1]
@@ -2636,7 +2651,6 @@ def Purify_AllGenes(BLADE_object, Mu, Omega, Y, Ncores, Weight=100,sY = 1,Alpha0
     obj.log = logs
     
     return obj
-
 
 
 
