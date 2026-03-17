@@ -14,6 +14,12 @@ Optional:
 Behavior:
   • Bulk is ALWAYS normalized to counts-per-10k (CP10K) immediately after reading.
   • Delimiter for CSV/TSV auto-detected (comma or tab).
+
+Important:
+This script is modified to the use of a specific (large samples) experiment, please calibrate the script as per your own analysis. 
+Look into the sbatch file in the same folder as this one and change the memory requirements as per your own analysis. 
+
+Author: Aryamaan Bose, a.bose1@amsterdamumc.nl
 """
 
 import os
