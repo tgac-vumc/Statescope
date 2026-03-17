@@ -248,8 +248,7 @@ def main():
         IterMax=args.iter_max,
         backend=backend,
         Expectation=Expectation,
-        warm_start=args.warm_start,
-        Alpha=1,
+        warm_start=args.warm_start
     )
 
     # Save outputs
