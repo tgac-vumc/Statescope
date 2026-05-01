@@ -394,7 +394,7 @@ class Statescope:
             raise Exception("Deconvolution must be completed before Refinement.")
         
         if GeneList:
-            self.Genes = [gene for gene in Genes if gene in GeneList]
+            self.Genes = [gene for gene in self.Genes if gene in GeneList]
         # Prepare Signature
         scExp_All = self.scExp.loc[self.Genes, :].to_numpy()
         scVar_All = self.scVar.loc[self.Genes, :].to_numpy()
