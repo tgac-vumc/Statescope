@@ -62,7 +62,7 @@ def cNMF(data,k,nrun,ncores,niter=1000):
 
 
 def cNMF_Retrieval(data,StateLoadings,niter=1000):
-    k = StateLoadings.shape[1]    
+    k = StateLoadings.shape[1]  
     model = cnmf.CNMF(np.transpose(data), num_bases=k, niter=niter)
     model.W = StateLoadings.to_numpy()
     model.factorize(niter=niter, compute_w=False)

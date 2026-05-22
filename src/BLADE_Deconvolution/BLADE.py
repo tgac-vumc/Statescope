@@ -753,7 +753,7 @@ class BLADE:
         #s1 = timer()
         out = scipy.optimize.minimize(
                 fun = loss, x0 = Init.cpu().numpy(), bounds = bounds, jac = grad,
-                options = {'disp': False},
+                options = {'disp': True},
                 method='L-BFGS-B')
         
         params = out.x
@@ -1069,6 +1069,7 @@ def Iterative_Optimization(X, stdX, Y, Alpha, Alpha0, Kappa0, SY, Rep, Init_Frac
     for i in range(1, iter):
         # print(obj.Beta, "Before Optimize loop")
         # s3 = timer()
+        print(i)
         obj.Optimize()
         # print(type(obj.Nu))
         # e3 = timer()
