@@ -22,13 +22,32 @@ pip install Statescope
 
 We tested Statescope with `python => 3.10`.
 
-###  Running a demo script
+### Using conda
 
+In case the pip installation gives you problems, you can also use the environment.yaml file provided on this Github.
+
+```
+conda env create -f environment.yaml
+conda activate Statescope
+```
+
+This install Statescope version 1.0.7 with python 3.10.19
+
+##  Running a demo script
+
+### Basic Tutorial
 You can find an basic demo script under the `tutorial` folder.
 You can open the script using the command below after installing Statecope:
 
 ```
 jupyter notebook tutorial/BasicTutorial.ipynb
+```
+
+### Advanced Tutorial
+You can also find a more advanced demo script under the `tutorial` folder.
+
+```
+jupyter notebook tutorial/AdvancedTutorial.ipynb
 ```
 
 ## Documentation
