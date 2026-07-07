@@ -31,7 +31,7 @@ conda env create -f environment.yaml
 conda activate Statescope
 ```
 
-This install Statescope version 1.0.7 with python 3.10.19
+This install Statescope version 1.0.8 with python 3.10.19
 
 ##  Running a demo script
 
