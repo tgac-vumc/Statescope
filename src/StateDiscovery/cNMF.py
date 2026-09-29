@@ -64,7 +64,7 @@ def StateDiscovery_FrameWork(
       :param n_final_iter:  Restarts for the final model at the chosen *k*.
       :param min_cophenetic:Threshold for the cophenetic coefficient; the first
                             k ≥ this value is selected.
-      :param max_clusters:  Maximum k tested in the sweep (upper bound, excl.).
+      :param max_clusters:  Maximum k-1 tested in the sweep (upper bound, excl.).
       :param Ncores:        CPU cores used for parallel cNMF runs.
 
       :return: ``(final_model, coeffs)``, where *coeffs* is the full list of
@@ -147,7 +147,7 @@ def StateRetrieval(GEX,Omega,celltype,StateLoadings,weighing = 'Omega',Fractions
     return StateScores
 
 
-def EcoTypeDiscovery_FrameWork(state_scores,
+def EcoTypeDiscovery_FrameWork(cNMF_input,
         K=None,
         n_iter=10,
         n_final_iter=100,
@@ -157,8 +157,8 @@ def EcoTypeDiscovery_FrameWork(state_scores,
     """
         Run the cNMF‐based EcoType-discovery workflow
 
-        :param Statescores:   Statescores dict (samples x states with cts for keys).
-        :param K:             Desired number of states.  
+        :param cNMF_input:    cNMF input dataframe (samples x states (+ celltypes)).
+        :param K:             Desired number of ecotypes.  
                                 • *None* ⇒ run a cophenetic sweep to choose *k*  
                                 • int   ⇒ use that value and skip the sweep.
         :param n_iter:        Number of cNMF restarts **per k** during the sweep.
@@ -172,8 +172,8 @@ def EcoTypeDiscovery_FrameWork(state_scores,
               cophenetic coefficients if a sweep was run, otherwise the single
               final coefficient.
     """
-     # Make numpy array from statescores
-    state_scores = state_scores.to_numpy()
+     # Make numpy array from cNMF_input
+    cNMF_input = cNMF_input.to_numpy()
                 
     data_dict   = {}         
     sweep_curve = None        # list of cophenetic coefficients if we sweep
@@ -185,7 +185,7 @@ def EcoTypeDiscovery_FrameWork(state_scores,
         print(f'A value of K is automatically selected between 2 and {max_clusters}')
         for k in range(2, max_clusters):
             print(f'Running initial cNMF ({n_iter} iterations) with K={k}')
-            cNMF_model_k, cophcor_k, consensus_k = cNMF(state_scores, k, n_iter, Ncores)
+            cNMF_model_k, cophcor_k, consensus_k = cNMF(cNMF_input, k, n_iter, Ncores)
 
             
             
@@ -207,13 +207,13 @@ def EcoTypeDiscovery_FrameWork(state_scores,
                       or biggest_drop(sweep_curve)
     else:
         nclust = K
-    
+
     # 2) final long run at chosen k
     
     print(f'The selected value for K is {nclust}')
     print(f'Running final cNMF ({n_final_iter} iterations) with K={nclust}')
     cNMF_model, cophcors_final, consensus_matrix = \
-        cNMF(state_scores, nclust, n_final_iter, Ncores)
+        cNMF(cNMF_input, nclust, n_final_iter, Ncores)
     
     
     # 3) return 
@@ -225,23 +225,23 @@ def EcoTypeDiscovery_FrameWork(state_scores,
 
 
 # EcotypeRetrieval: Calculate Ecotype scores with predefined ecotype loadings in external dataset
-def EcotypeRetrieval(Statescores, EcotypeLoadings):
+def EcotypeRetrieval(cNMF_input, EcotypeLoadings):
     """
       Run cNMF‐based ecotype-retrieval with predefined Ecotypeloadings.
 
-      :param Statescores: Retrieved Statescores from StateRetrieval of external dataset
+      :param cNMF_input: Retrieved Statescores from StateRetrieval of external dataset with optional estimated fractions
       :param EcotypeLoadings: EcotypeLoadings from ecotype discovery of external dataset
       
       :return: ``EcotypeScores``, EcotypeScores of Ecotypes retrieved in new data
     """
-    # Check if retrieved states are the same as states in ecotype loadings
-    if not Statescores.columns.to_list() == EcotypeLoadings.index.to_list():
-        raise AttributeError("StateScores are not of same states as EcotypeLoadings. Check if Statescores are actually recovered from same external dataset")
+    # Check if cNMF_input is the same as in ecotype loadings
+    if not cNMF_input.columns.to_list() == EcotypeLoadings.index.to_list():
+        raise AttributeError("cNMF_input is not the same as for the EcotypeLoadings. Check if Statescores are actually recovered from same external dataset and fractions are estimated using the same cell types")
     
-    ## Adjust statescores to numpy array for use in cNMF_Retrieval
-    Statescores = Statescores.to_numpy()
+    ## Adjust cNMF_input to numpy array for use in cNMF_Retrieval
+    cNMF_input = cNMF_input.to_numpy()
     # Run cNMF recovery
-    cNMF_model = cNMF_Retrieval(Statescores, EcotypeLoadings)
+    cNMF_model = cNMF_Retrieval(cNMF_input, EcotypeLoadings)
     EcotypeScores = pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,cNMF_model.H.T))
     return EcotypeScores
     

@@ -559,7 +559,8 @@ class Statescope:
         n_iter: int = 10,
         n_final_iter: int = 100,
         min_cophenetic: float = 0.9,
-        max_clusters: int = 10):
+        max_clusters: int = 10,
+        fractions = False):
         """
          
         Perform EcoTypeDiscovery from StateScores using cNMF.
@@ -570,6 +571,7 @@ class Statescope:
         :param n_final_iter: Number of final cNMF restarts.
         :param min_cophenetic: Minimum cophenetic coefficient to determine K.
         :param max_clusters: Maximum number of clusters/states to consider.
+        :param fractions: include estimated fractions in ecotype discovery
 
         :param K : int  None, optional
             • None   – automatically chooses k  
@@ -589,11 +591,18 @@ class Statescope:
         
         if not self.isStateDiscoveryDone:
             raise RuntimeError("Run StateDiscovery before EcoTypeDiscovery.")
-        
-        # 1) run cNMF / EcoTypeDiscovery               
-        print('Performing cNMF EcoType Discovery')
+
+        # 1) Prepare input
+        if fractions:
+            cNMF_input = Create_Statescore_fraction_cNMF_input(self)
+            print('Performing cNMF EcoType Discovery with statescores and fractions')
+        else:
+            cNMF_input = Extract_StateScores(self)
+            print('Performing cNMF EcoType Discovery with only statescores')
+
+        # 2) run cNMF / EcoTypeDiscovery
         model, coph = EcoTypeDiscovery_FrameWork(
-                Extract_StateScores(self),
+                cNMF_input,
                 K,                 # may be None → auto
                 n_iter,
                 n_final_iter,
@@ -604,9 +613,9 @@ class Statescope:
         EcoType_cNMF = model
         EcoType_CopheneticCoefficients = coph
         EcoTypeScores =  pd.DataFrame(np.apply_along_axis(lambda x: x/ sum(x),1,model.H.T), index=self.Samples)
-        EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) )
+        EcoTypeLoadings = pd.DataFrame(model.W, index=get_StateNames(self) + self.Celltypes)
              
-        # 2) stash results in the object                               
+        # 3) stash results in the object                               
         if not hasattr(self, 'EcoType_cNMF'):
             self.EcoType_cNMF                   = EcoType_cNMF
             self.EcoType_CopheneticCoefficients = EcoType_CopheneticCoefficients
@@ -769,6 +778,32 @@ def Extract_StateScores(Statescope_model, celltype = None):
 
     # Return the state scores
     return state_scores
+
+def Create_Statescore_fraction_cNMF_input(Statescope_model):
+    """
+    Extracts the state scores and the estimated fractions from a Statescope model after StateDiscovery has been performed.
+    Additionally weighs the fractions by nCelltypes and the statescores by nStates within celltype.
+
+    :param Statescope_model: The Statescope object containing state discovery results.
+    
+    :returns: pandas.DataFrame containing weighted state scores and fractions for all samples and cell types.
+    :raises AttributeError: If StateDiscovery has not been completed or the StateScores attribute is missing.
+    """
+    statescores = Extract_StateScores(Statescope_model)
+    fractions = Statescope_model.Fractions
+            
+    ## weight statescores by number of states in celltype
+    celltype_names = statescores.columns.str.rsplit('_', n=1).str[0]
+    n_states = celltype_names.value_counts()
+    scaling_factors = celltype_names.map(n_states)
+    statescores_weighted = statescores.mul(scaling_factors, axis = 1)
+            
+    ## weight fractions by nCelltypes
+    fractions_weighted = fractions * len(Statescope_model.Celltypes)
+            
+    ## Concatenate weighted statescores and fractions
+    cNMF_input = pd.concat([statescores_weighted, fractions_weighted], axis = 1)
+    return cNMF_input
 
 def Extract_StateLoadings(Statescope_model, celltype = None):
     """
